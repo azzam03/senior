@@ -1,0 +1,7 @@
+node_modules/
+.env.local
+npm-debug.log*
+database/backups/*.db
+uploads/
+logs/
+tmp/

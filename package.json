@@ -1,0 +1,21 @@
+{
+  "name": "data-classification-governance-platform",
+  "version": "1.0.0",
+  "description": "Enterprise SaaS platform for AI-driven data classification, governance workflows, PDPL support, and client-ready Excel reporting.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "dev": "node --no-warnings server.js",
+    "codex:start": "node scripts/start-codex.js",
+    "verify": "node scripts/verify-platform.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "csv-parse": "^5.6.0",
+    "dotenv": "^16.4.7",
+    "exceljs": "^3.4.0",
+    "express": "^4.21.2",
+    "multer": "^2.0.2"
+  }
+}

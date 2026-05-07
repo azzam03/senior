@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DATA CLASSIFICATION & GOVERNANCE PLATFORM</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <section id="authScreen" class="auth-screen">
+      <div class="auth-brand">
+        <div class="brand-mark">DC</div>
+        <div>
+          <p class="eyebrow">Enterprise SaaS</p>
+          <h1>DATA CLASSIFICATION & GOVERNANCE PLATFORM</h1>
+          <p class="auth-copy">
+            Classify database metadata, govern personal data, manage review workflows, and export client-ready reporting.
+          </p>
+        </div>
+      </div>
+
+      <div class="auth-card">
+        <div class="auth-card-header">
+          <p class="eyebrow">Secure Access</p>
+          <h2>Welcome</h2>
+          <p>Sign in or create an account to continue.</p>
+        </div>
+
+        <div class="auth-tabs" role="tablist" aria-label="Authentication">
+          <button class="auth-tab active" data-auth-tab="login" type="button">Login</button>
+          <button class="auth-tab" data-auth-tab="signup" type="button">Sign Up</button>
+        </div>
+
+        <form id="loginForm" class="auth-form active" data-auth-panel="login">
+          <label>
+            Email
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" autocomplete="current-password" required />
+          </label>
+          <button class="btn btn-primary btn-wide" type="submit">Login</button>
+        </form>
+
+        <form id="signupForm" class="auth-form" data-auth-panel="signup">
+          <label>
+            Full Name
+            <input name="name" type="text" autocomplete="name" required />
+          </label>
+          <label>
+            Email
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" autocomplete="new-password" minlength="6" required />
+          </label>
+          <label>
+            Account Type
+            <select name="accountType" id="accountTypeSelect">
+              <option>Individual</option>
+              <option>Company</option>
+            </select>
+          </label>
+          <label id="companyNameField" class="hidden">
+            Company Name
+            <input name="companyName" type="text" autocomplete="organization" />
+          </label>
+          <button class="btn btn-primary btn-wide" type="submit">Create Account</button>
+        </form>
+
+        <form id="forgotForm" class="auth-form" data-auth-panel="forgot">
+          <label>
+            Email
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <button class="btn btn-primary btn-wide" type="submit">Generate Reset Token</button>
+          <output id="resetTokenOutput" class="form-output"></output>
+        </form>
+
+        <form id="resetForm" class="auth-form" data-auth-panel="reset">
+          <label>
+            Reset Token
+            <input name="token" id="resetTokenInput" type="text" autocomplete="one-time-code" required />
+          </label>
+          <label>
+            New Password
+            <input name="password" type="password" autocomplete="new-password" minlength="6" required />
+          </label>
+          <button class="btn btn-primary btn-wide" type="submit">Reset Password</button>
+        </form>
+
+        <div class="auth-secondary-links" aria-label="Account recovery">
+          <button class="auth-link" data-auth-link="forgot" type="button">Forgot password?</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="appShell" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark">DC</div>
+          <div>
+            <strong>Classification</strong>
+            <span>Governance Platform</span>
+          </div>
+        </div>
+        <nav class="sidebar-nav">
+          <button class="nav-item active" id="dashboardNav" type="button">
+            <span class="nav-icon">D</span>
+            Dashboard
+          </button>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">DATA CLASSIFICATION & GOVERNANCE PLATFORM</p>
+            <h2 id="welcomeTitle">Welcome</h2>
+          </div>
+          <div class="profile">
+            <div class="avatar" id="userAvatar">U</div>
+            <div>
+              <strong id="profileName">User</strong>
+              <span id="profileEmail">user@example.com</span>
+            </div>
+            <button id="logoutButton" class="btn btn-ghost" type="button">Logout</button>
+          </div>
+        </header>
+
+        <section id="dashboardPage" class="page active">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Executive Dashboard</p>
+              <h1>Systems Portfolio</h1>
+              <p>Track classification progress, governance review, and system ownership across the organization.</p>
+            </div>
+            <button id="openAddSystemModal" class="btn btn-primary" type="button">Add New System</button>
+          </div>
+
+          <div class="stats-grid">
+            <article class="stat-card">
+              <span>Total Systems</span>
+              <strong id="statTotalSystems">0</strong>
+            </article>
+            <article class="stat-card">
+              <span>Systems In Progress</span>
+              <strong id="statInProgress">0</strong>
+            </article>
+            <article class="stat-card">
+              <span>Completed Systems</span>
+              <strong id="statCompleted">0</strong>
+            </article>
+            <article class="stat-card">
+              <span>Completion Percentage</span>
+              <strong id="statCompletion">0%</strong>
+            </article>
+          </div>
+
+          <section class="section-card">
+            <div class="section-header">
+              <div>
+                <h2>Systems List</h2>
+                <p>Open a system to upload metadata, run classification, review governance actions, and export reports.</p>
+              </div>
+            </div>
+            <div id="systemsGrid" class="systems-grid"></div>
+            <div id="emptySystems" class="empty-state">
+              <strong>No systems created yet.</strong>
+              <span>Add a system to begin classification and governance review.</span>
+            </div>
+          </section>
+        </section>
+
+        <section id="systemPage" class="page">
+          <button id="backToDashboard" class="btn btn-ghost" type="button">&lt; Dashboard</button>
+
+          <section class="system-hero">
+            <div>
+              <p class="eyebrow">Active System</p>
+              <h1 id="systemNameTitle">System Name</h1>
+              <div class="system-meta">
+                <span id="systemOwnerMeta">Owner</span>
+                <span id="systemDbaMeta">DBA</span>
+                <span id="systemOwnerEmailMeta">owner@example.com</span>
+                <span id="systemGroupMeta">Group</span>
+              </div>
+            </div>
+            <div class="system-status-panel">
+              <span class="status-pill" id="systemStatusPill">In Progress</span>
+              <span class="file-chip" id="activeFileChip">No file uploaded</span>
+            </div>
+          </section>
+
+          <div class="tabs" role="tablist" aria-label="System sections">
+            <button class="tab active" data-tab="overview" type="button">Overview</button>
+            <button class="tab" data-tab="system-data" type="button">System Data</button>
+            <button class="tab" data-tab="personal-data" type="button">Personal Data</button>
+            <button class="tab" data-tab="system-context" type="button">System Context</button>
+            <button class="tab" data-tab="pdpl" type="button">PDPL</button>
+            <button class="tab" data-tab="system-links" type="button">System Links</button>
+          </div>
+
+          <section id="overviewTab" class="tab-panel active">
+            <div class="analytics-grid">
+              <article class="metric-card">
+                <span>Fully Classified</span>
+                <strong id="overviewClassified">0</strong>
+                <em id="overviewClassifiedPct">0%</em>
+              </article>
+              <article class="metric-card">
+                <span>Personal Data</span>
+                <strong id="overviewPersonal">0</strong>
+                <em id="overviewPersonalPct">0%</em>
+              </article>
+              <article class="metric-card">
+                <span>Pending Classification</span>
+                <strong id="overviewPending">0</strong>
+                <em id="overviewPendingPct">0%</em>
+              </article>
+              <article class="metric-card">
+                <span>Review Queue</span>
+                <strong id="overviewReviewQueue">0</strong>
+                <em>governance items</em>
+              </article>
+            </div>
+
+            <div class="overview-layout">
+              <article class="section-card">
+                <div class="section-header compact">
+                  <h2>Confidentiality Distribution</h2>
+                </div>
+                <div id="confidentialityChart" class="chart-list"></div>
+              </article>
+              <article class="section-card">
+                <div class="section-header compact">
+                  <h2>Personal Data Distribution</h2>
+                </div>
+                <div id="personalChart" class="chart-list"></div>
+              </article>
+              <article class="section-card">
+                <div class="section-header compact">
+                  <h2>Classification Progress</h2>
+                </div>
+                <div class="donut-progress" aria-label="Classification progress">
+                  <svg viewBox="0 0 120 120" role="img" aria-labelledby="overviewProgressLabel">
+                    <circle class="donut-track" cx="60" cy="60" r="46"></circle>
+                    <circle id="overviewProgressCircle" class="donut-ring" cx="60" cy="60" r="46" pathLength="100"></circle>
+                  </svg>
+                  <div class="donut-center">
+                    <strong id="overviewProgressLabel">0%</strong>
+                    <span>classified</span>
+                  </div>
+                  <div class="donut-legend">
+                    <span><i class="legend-dot classified"></i> Classified</span>
+                    <span><i class="legend-dot remaining"></i> Remaining</span>
+                  </div>
+                </div>
+              </article>
+              <article class="section-card">
+                <div class="section-header compact">
+                  <h2>Governance Summary</h2>
+                </div>
+                <div class="summary-list">
+                  <div><span>Low-confidence count</span><strong id="overviewLowConfidence">0</strong></div>
+                  <div><span>Policy recommendations</span><strong id="overviewPolicyCount">0</strong></div>
+                  <div><span>Tables containing personal data</span><strong id="overviewTablesPersonal">0</strong></div>
+                  <div><span>Uploaded file</span><strong id="overviewFileName">No file uploaded</strong></div>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section id="systemDataTab" class="tab-panel">
+            <section class="section-card">
+              <div class="section-header">
+                <div>
+                  <h2>System Data</h2>
+                  <p>Upload Excel or CSV metadata. Classification uses only TableName and ColumnName, while all original columns remain visible and exportable.</p>
+                </div>
+                <span class="file-chip" id="dataTabFileName">No file uploaded</span>
+              </div>
+
+              <form id="uploadForm" class="upload-panel">
+                <input id="metadataFileInput" name="metadataFile" type="file" accept=".xlsx,.xls,.csv" required />
+                <div>
+                  <span class="panel-label">Active metadata file</span>
+                  <strong id="systemDataActiveFile">No file uploaded</strong>
+                </div>
+                <button id="importFilePrimaryButton" class="btn btn-primary" type="button">Import Excel / CSV</button>
+              </form>
+
+              <div class="classification-panel">
+                <div class="classification-file-block">
+                  <span class="panel-label">Classification Progress</span>
+                  <strong id="classificationFileName">No file uploaded</strong>
+                  <span id="classificationStatus" class="hidden">Ready for classification</span>
+                </div>
+                <div class="classification-metrics">
+                  <strong id="classificationPercentLabel">0% classified</strong>
+                  <span id="pendingPercentLabel">0% pending</span>
+                </div>
+                <progress id="classificationProgress" value="0" max="100"></progress>
+              </div>
+
+              <div class="table-toolbar">
+                <div class="toolbar-group">
+                  <details class="actions-menu">
+                    <summary class="btn btn-primary">Actions</summary>
+                    <div class="actions-menu-list">
+                      <button id="classifyPageButton" type="button">Classify Current Page</button>
+                      <button id="classifyAllButton" type="button">Auto Classify All Pages</button>
+                      <button id="exportExcelButton" type="button">Export to Excel</button>
+                      <button id="importExcelButton" type="button">Import Excel / CSV</button>
+                    </div>
+                  </details>
+                </div>
+                <div class="toolbar-group table-controls">
+                  <div class="segmented-control">
+                    <button class="active" data-view-mode="classification" type="button">Classification View</button>
+                    <button data-view-mode="edit" type="button">Edit View</button>
+                  </div>
+                  <input id="recordSearch" class="search-box" type="search" placeholder="Search table, column, classification, reason..." />
+                </div>
+              </div>
+
+              <div class="record-counter" id="recordCounter">0 records</div>
+              <div class="data-table-wrap">
+                <table class="data-table" id="recordsTable">
+                  <thead id="recordsTableHead"></thead>
+                  <tbody id="recordsTableBody"></tbody>
+                </table>
+              </div>
+              <div class="pagination">
+                <button id="prevPageButton" class="btn btn-ghost" type="button">Previous</button>
+                <span id="paginationLabel">Page 1 of 1</span>
+                <button id="nextPageButton" class="btn btn-ghost" type="button">Next</button>
+              </div>
+            </section>
+          </section>
+
+          <section id="personalDataTab" class="tab-panel">
+            <section class="section-card">
+              <div class="section-header">
+                <div>
+                  <h2>Personal Data</h2>
+                  <p>Rows identified as personal data with PDPL governance indicators and review actions.</p>
+                </div>
+                <button id="approvePersonalPageButton" class="btn btn-secondary" type="button">Approve All on Page</button>
+              </div>
+              <div class="data-table-wrap">
+                <table class="data-table" id="personalTable">
+                  <thead id="personalTableHead"></thead>
+                  <tbody id="personalTableBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section id="systemContextTab" class="tab-panel">
+            <section class="context-layout">
+              <form id="contextForm" class="section-card form-card">
+                <div class="section-header compact">
+                  <h2>Add Context Point</h2>
+                </div>
+                <label>
+                  Tag
+                  <select name="tag" required>
+                    <option>System Service Brief</option>
+                    <option>System Description</option>
+                    <option>System Personas</option>
+                  </select>
+                </label>
+                <label>
+                  Content
+                  <textarea name="content" id="contextContent" maxlength="1600" rows="8" required></textarea>
+                </label>
+                <span id="contextWordCount" class="helper-text">0 / 200 words</span>
+                <button class="btn btn-primary" type="submit">Save Context</button>
+              </form>
+              <div class="section-card">
+                <div class="section-header compact">
+                  <h2>Context Library</h2>
+                </div>
+                <div id="contextCards" class="cards-list"></div>
+              </div>
+            </section>
+          </section>
+
+          <section id="pdplTab" class="tab-panel">
+            <div class="analytics-grid">
+              <article class="metric-card">
+                <span>Compliant</span>
+                <strong id="pdplCompliant">0</strong>
+              </article>
+              <article class="metric-card">
+                <span>Needs Review</span>
+                <strong id="pdplNeedsReview">0</strong>
+              </article>
+              <article class="metric-card">
+                <span>Non-Compliant</span>
+                <strong id="pdplNonCompliant">0</strong>
+              </article>
+            </div>
+
+            <section class="pdpl-layout">
+              <form id="pdplForm" class="section-card form-card">
+                <div class="section-header compact">
+                  <h2>Governance Notes</h2>
+                </div>
+                <label>
+                  Notes
+                  <textarea name="governanceNotes" rows="7"></textarea>
+                </label>
+                <label>
+                  Data Subject Rights Coverage
+                  <select name="dataSubjectRightsCoverage">
+                    <option>Compliant</option>
+                    <option>Needs Review</option>
+                    <option>Non-Compliant</option>
+                  </select>
+                </label>
+                <label>
+                  Consent Tracking Status
+                  <select name="consentTrackingStatus">
+                    <option>Compliant</option>
+                    <option>Needs Review</option>
+                    <option>Non-Compliant</option>
+                  </select>
+                </label>
+                <label>
+                  Cross-Border Transfer Flags
+                  <select name="crossBorderTransferFlags">
+                    <option>No Flags Recorded</option>
+                    <option>Potential Transfer</option>
+                    <option>Restricted Transfer</option>
+                  </select>
+                </label>
+                <button class="btn btn-primary" type="submit">Save PDPL Notes</button>
+              </form>
+              <div class="section-card">
+                <div class="section-header compact">
+                  <h2>PDPL Obligations</h2>
+                </div>
+                <div class="data-table-wrap">
+                  <table class="data-table">
+                    <thead>
+                      <tr>
+                        <th>Table</th>
+                        <th>Column</th>
+                        <th>Personal Data Type</th>
+                        <th>Policy Guidance</th>
+                        <th>Review Status</th>
+                      </tr>
+                    </thead>
+                    <tbody id="pdplObligationsBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <section id="systemLinksTab" class="tab-panel">
+            <section class="links-layout">
+              <form id="linkForm" class="section-card form-card">
+                <div class="section-header compact">
+                  <h2>Add System Link</h2>
+                </div>
+                <label>
+                  Title
+                  <input name="title" type="text" required />
+                </label>
+                <label>
+                  URL
+                  <input name="url" type="url" required />
+                </label>
+                <label>
+                  Category
+                  <select name="category">
+                    <option>Documentation</option>
+                    <option>API</option>
+                    <option>Governance Policy</option>
+                    <option>Other</option>
+                  </select>
+                </label>
+                <label>
+                  Description
+                  <textarea name="description" rows="4"></textarea>
+                </label>
+                <button class="btn btn-primary" type="submit">Save Link</button>
+              </form>
+              <div class="section-card">
+                <div class="section-header compact">
+                  <h2>Reference Library</h2>
+                </div>
+                <div id="systemLinksCards" class="cards-list"></div>
+              </div>
+            </section>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="addSystemModal" class="modal">
+      <form id="addSystemForm" class="modal-card">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Governance Setup</p>
+            <h2>Add New System</h2>
+          </div>
+          <button class="icon-button" id="closeAddSystemModal" type="button" aria-label="Close modal">x</button>
+        </div>
+        <div class="form-grid">
+          <label>
+            System Name
+            <input name="name" type="text" required />
+          </label>
+          <label>
+            Responsible Owner
+            <input name="owner" type="text" required />
+          </label>
+          <label>
+            Database Administrator (DBA)
+            <input name="dba" type="text" required />
+          </label>
+          <label>
+            Owner Email
+            <input name="ownerEmail" type="email" required />
+          </label>
+          <label>
+            System Group
+            <input name="systemGroup" type="text" required />
+          </label>
+          <label>
+            Assigned Consultant
+            <input name="assignedConsultant" type="text" />
+          </label>
+          <label>
+            Source System Reference
+            <input name="sourceSystemRef" type="text" />
+          </label>
+          <label>
+            Target System Reference
+            <input name="targetSystemRef" type="text" />
+          </label>
+          <label class="form-grid-wide">
+            Related System Links
+            <input name="relatedSystemLinks" type="text" placeholder="CRM, ERP, reporting mart..." />
+          </label>
+          <label class="checkbox-row form-grid-wide">
+            <input name="additionalSystem" type="checkbox" />
+            Additional System
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="cancelAddSystem" type="button">Cancel</button>
+          <button class="btn btn-primary" type="submit">Create System</button>
+        </div>
+      </form>
+    </dialog>
+
+    <template id="systemCardTemplate">
+      <article class="system-card">
+        <div class="system-card-header">
+          <div>
+            <span class="status-pill">In Progress</span>
+            <h3></h3>
+          </div>
+          <button class="btn btn-ghost open-system" type="button">Open</button>
+        </div>
+        <div class="system-card-meta"></div>
+        <progress value="0" max="100"></progress>
+        <div class="system-card-footer">
+          <span class="records-count">0 records</span>
+          <span class="file-chip">No file uploaded</span>
+        </div>
+      </article>
+    </template>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

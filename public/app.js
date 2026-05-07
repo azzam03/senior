@@ -1,0 +1,1029 @@
+/* DATA CLASSIFICATION & GOVERNANCE PLATFORM
+ * This file owns browser behavior only. The visible app structure lives in index.html,
+ * the visual system lives in styles.css, and this script connects the UI to backend APIs,
+ * SSE classification streams, upload handling, review workflows, and export actions.
+ */
+
+const state = {
+  user: null,
+  systems: [],
+  currentSystem: null,
+  activeTab: "overview",
+  records: [],
+  personalRecords: [],
+  originalColumns: [],
+  page: 1,
+  pageSize: 25,
+  totalPages: 1,
+  totalRecords: 0,
+  search: "",
+  sortBy: "rowIndex",
+  sortDir: "asc",
+  viewMode: "classification",
+  classifierStream: null,
+  liveUpdatedRecordId: null,
+};
+
+const qs = (selector, root = document) => root.querySelector(selector);
+const qsa = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+
+document.addEventListener("DOMContentLoaded", boot);
+
+/* Bootstrapping connects static HTML to live server state. It decides whether to show
+ * authentication or the authenticated SaaS shell and wires all event handlers once.
+ */
+async function boot() {
+  bindAuthEvents();
+  bindShellEvents();
+  bindSystemEvents();
+  bindDataEvents();
+  bindGovernanceEvents();
+
+  try {
+    const session = await api("/api/auth/me");
+    state.user = session.user;
+    showApp();
+    await loadDashboard();
+  } catch (_error) {
+    showAuth();
+  }
+}
+
+/* API helper centralizes request behavior so authentication, JSON parsing,
+ * and error display are consistent across every workflow.
+ */
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    headers: options.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
+    ...options,
+  });
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json") ? await response.json() : await response.text();
+  if (!response.ok) {
+    throw new Error(data.error || data.message || "Request failed");
+  }
+  return data;
+}
+
+function bindAuthEvents() {
+  qsa(".auth-tab").forEach((button) => {
+    button.addEventListener("click", () => switchAuthTab(button.dataset.authTab));
+  });
+  qsa(".auth-link").forEach((button) => {
+    button.addEventListener("click", () => switchAuthTab(button.dataset.authLink));
+  });
+
+  qs("#accountTypeSelect").addEventListener("change", (event) => {
+    qs("#companyNameField").classList.toggle("hidden", event.target.value !== "Company");
+  });
+
+  qs("#loginForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formJson(event.currentTarget);
+    try {
+      const result = await api("/api/auth/login", { method: "POST", body: JSON.stringify(body) });
+      state.user = result.user;
+      window.location.replace("/app");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  qs("#signupForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = formJson(event.currentTarget);
+    try {
+      const result = await api("/api/auth/signup", { method: "POST", body: JSON.stringify(body) });
+      state.user = result.user;
+      window.location.replace("/app");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  qs("#forgotForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const result = await api("/api/auth/forgot-password", {
+        method: "POST",
+        body: JSON.stringify(formJson(event.currentTarget)),
+      });
+      qs("#resetTokenOutput").textContent = result.resetToken
+        ? `Reset token: ${result.resetToken}`
+        : result.message;
+      if (result.resetToken) qs("#resetTokenInput").value = result.resetToken;
+      switchAuthTab("reset");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  qs("#resetForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await api("/api/auth/reset-password", { method: "POST", body: JSON.stringify(formJson(event.currentTarget)) });
+      toast("Password reset complete.");
+      switchAuthTab("login");
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+}
+
+function switchAuthTab(tab) {
+  qsa(".auth-tab").forEach((button) => button.classList.toggle("active", button.dataset.authTab === tab));
+  qsa(".auth-link").forEach((button) => button.classList.toggle("active", button.dataset.authLink === tab));
+  qsa("[data-auth-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.authPanel === tab));
+}
+
+function bindShellEvents() {
+  qs("#logoutButton").addEventListener("click", async () => {
+    await api("/api/auth/logout", { method: "POST", body: JSON.stringify({}) }).catch(() => null);
+    state.user = null;
+    state.currentSystem = null;
+    state.records = [];
+    state.personalRecords = [];
+    window.location.replace("/");
+  });
+
+  qs("#dashboardNav").addEventListener("click", showDashboard);
+  qs("#backToDashboard").addEventListener("click", showDashboard);
+  qs("#openAddSystemModal").addEventListener("click", () => qs("#addSystemModal").showModal());
+  qs("#closeAddSystemModal").addEventListener("click", () => qs("#addSystemModal").close());
+  qs("#cancelAddSystem").addEventListener("click", () => qs("#addSystemModal").close());
+
+  qs("#addSystemForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    try {
+      const result = await api("/api/systems", {
+        method: "POST",
+        body: JSON.stringify(formJson(form)),
+      });
+      qs("#addSystemModal").close();
+      form.reset();
+      await loadDashboard();
+      await openSystem(result.system.id);
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+}
+
+function bindSystemEvents() {
+  qsa(".tab").forEach((button) => {
+    button.addEventListener("click", () => switchSystemTab(button.dataset.tab));
+  });
+}
+
+/* System Data is the operational center. These handlers manage upload visibility,
+ * data retrieval, live SSE classification, sorting, paging, and Excel export.
+ */
+function bindDataEvents() {
+  qs("#metadataFileInput").addEventListener("change", (event) => {
+    const fileName = event.target.files?.[0]?.name;
+    if (fileName) {
+      setClassificationStatus(`Ready to import ${fileName}`, 0);
+      qs("#uploadForm").requestSubmit();
+    }
+  });
+
+  qs("#importExcelButton").addEventListener("click", () => {
+    closeActionsMenu();
+    qs("#metadataFileInput").click();
+  });
+  qs("#importFilePrimaryButton").addEventListener("click", () => qs("#metadataFileInput").click());
+
+  qs("#uploadForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.currentSystem) return;
+    const fileInput = qs("#metadataFileInput");
+    if (!fileInput.files.length) {
+      toast("Choose an Excel or CSV file first.");
+      return;
+    }
+    const formData = new FormData();
+    formData.append("metadataFile", fileInput.files[0]);
+    try {
+      setClassificationStatus(`Importing ${fileInput.files[0].name}`, 0);
+      const result = await api(`/api/systems/${state.currentSystem.id}/upload`, { method: "POST", body: formData });
+      state.currentSystem.lastUploadFileName = result.fileName;
+      state.originalColumns = result.originalColumns;
+      updateFileNameLabels(result.fileName);
+      toast(`Imported ${result.rowsImported} rows from ${result.fileName}.`);
+      await reloadCurrentSystem();
+      await loadRecords();
+      renderOverview(result.summary);
+      setClassificationStatus("Ready for classification", 0);
+    } catch (error) {
+      toast(error.message);
+      setClassificationStatus("Import failed", 0);
+    }
+  });
+
+  qs("#classifyPageButton").addEventListener("click", () => {
+    closeActionsMenu();
+    startClassification("page");
+  });
+  qs("#classifyAllButton").addEventListener("click", () => {
+    closeActionsMenu();
+    startClassification("all");
+  });
+  qs("#exportExcelButton").addEventListener("click", () => {
+    if (!state.currentSystem) return;
+    closeActionsMenu();
+    updateFileNameLabels(state.currentSystem.lastUploadFileName || "No file uploaded");
+    window.location.href = `/api/systems/${state.currentSystem.id}/export`;
+  });
+
+  qs("#recordSearch").addEventListener("input", debounce((event) => {
+    state.search = event.target.value;
+    state.page = 1;
+    loadRecords();
+  }, 250));
+
+  qsa("[data-view-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.viewMode = button.dataset.viewMode;
+      qsa("[data-view-mode]").forEach((item) => item.classList.toggle("active", item === button));
+      renderRecordsTable();
+    });
+  });
+
+  qs("#prevPageButton").addEventListener("click", () => {
+    if (state.page > 1) {
+      state.page -= 1;
+      loadRecords();
+    }
+  });
+
+  qs("#nextPageButton").addEventListener("click", () => {
+    if (state.page < state.totalPages) {
+      state.page += 1;
+      loadRecords();
+    }
+  });
+}
+
+function bindGovernanceEvents() {
+  qs("#contextContent").addEventListener("input", (event) => {
+    const words = wordCount(event.target.value);
+    qs("#contextWordCount").textContent = `${words} / 200 words`;
+    qs("#contextWordCount").classList.toggle("warning", words > 200);
+  });
+
+  qs("#contextForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.currentSystem) return;
+    const form = event.currentTarget;
+    const body = formJson(form);
+    if (wordCount(body.content) > 200) {
+      toast("Context content must be 200 words or fewer.");
+      return;
+    }
+    try {
+      await api(`/api/systems/${state.currentSystem.id}/context`, { method: "POST", body: JSON.stringify(body) });
+      form.reset();
+      qs("#contextWordCount").textContent = "0 / 200 words";
+      await loadContext();
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  qs("#pdplForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.currentSystem) return;
+    try {
+      await api(`/api/systems/${state.currentSystem.id}/pdpl`, {
+        method: "PUT",
+        body: JSON.stringify(formJson(event.currentTarget)),
+      });
+      toast("PDPL notes saved.");
+      await loadPdpl();
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  qs("#linkForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.currentSystem) return;
+    const form = event.currentTarget;
+    try {
+      await api(`/api/systems/${state.currentSystem.id}/links`, {
+        method: "POST",
+        body: JSON.stringify(formJson(form)),
+      });
+      form.reset();
+      await loadLinks();
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+
+  qs("#approvePersonalPageButton").addEventListener("click", approvePersonalOnPage);
+}
+
+function showAuth() {
+  qs("#authScreen").classList.remove("hidden");
+  qs("#appShell").classList.add("hidden");
+  if (window.location.pathname !== "/") {
+    window.history.replaceState({}, "", "/");
+  }
+}
+
+function showApp() {
+  qs("#authScreen").classList.add("hidden");
+  qs("#appShell").classList.remove("hidden");
+  qs("#dashboardPage").classList.add("active");
+  qs("#systemPage").classList.remove("active");
+  qs("#welcomeTitle").textContent = `Welcome, ${state.user.name}`;
+  qs("#profileName").textContent = state.user.name;
+  qs("#profileEmail").textContent = state.user.email;
+  qs("#userAvatar").textContent = state.user.avatarInitials || "U";
+  if (window.location.pathname !== "/app") {
+    window.history.replaceState({}, "", "/app");
+  }
+}
+
+async function loadDashboard() {
+  const [summary, systemsResult] = await Promise.all([api("/api/dashboard"), api("/api/systems")]);
+  state.systems = systemsResult.systems;
+  qs("#statTotalSystems").textContent = summary.totalSystems;
+  qs("#statInProgress").textContent = summary.systemsInProgress;
+  qs("#statCompleted").textContent = summary.completedSystems;
+  qs("#statCompletion").textContent = `${summary.completionPercentage}%`;
+  renderSystems();
+}
+
+function renderSystems() {
+  const grid = qs("#systemsGrid");
+  const template = qs("#systemCardTemplate");
+  grid.replaceChildren();
+  qs("#emptySystems").classList.toggle("hidden", state.systems.length > 0);
+
+  for (const system of state.systems) {
+    const fragment = template.content.cloneNode(true);
+    const card = qs(".system-card", fragment);
+    qs("h3", card).textContent = system.name;
+    qs(".status-pill", card).textContent = system.status;
+    qs(".system-card-meta", card).innerHTML = "";
+    qs(".system-card-meta", card).append(
+      textLine(`Owner: ${system.owner}`),
+      textLine(`DBA: ${system.dba}`),
+      textLine(`Group: ${system.systemGroup}`)
+    );
+    qs("progress", card).value = system.summary.classificationProgress || 0;
+    qs(".records-count", card).textContent = `${system.summary.totalRecords || 0} records`;
+    qs(".file-chip", card).textContent = system.lastUploadFileName || "No file uploaded";
+    qs(".open-system", card).addEventListener("click", () => openSystem(system.id));
+    grid.append(card);
+  }
+}
+
+function textLine(text) {
+  const span = document.createElement("span");
+  span.textContent = text;
+  return span;
+}
+
+async function openSystem(systemId) {
+  const result = await api(`/api/systems/${systemId}`);
+  state.currentSystem = result.system;
+  state.originalColumns = result.originalColumns;
+  state.page = 1;
+  state.search = "";
+  qs("#recordSearch").value = "";
+  renderSystemHeader();
+  showSystemPage();
+  switchSystemTab("overview");
+}
+
+async function reloadCurrentSystem() {
+  if (!state.currentSystem) return;
+  const result = await api(`/api/systems/${state.currentSystem.id}`);
+  state.currentSystem = result.system;
+  state.originalColumns = result.originalColumns;
+  renderSystemHeader();
+}
+
+function renderSystemHeader() {
+  const system = state.currentSystem;
+  qs("#systemNameTitle").textContent = system.name;
+  qs("#systemOwnerMeta").textContent = `Owner: ${system.owner}`;
+  qs("#systemDbaMeta").textContent = `DBA: ${system.dba}`;
+  qs("#systemOwnerEmailMeta").textContent = system.ownerEmail;
+  qs("#systemGroupMeta").textContent = `Group: ${system.systemGroup}`;
+  qs("#systemStatusPill").textContent = system.status;
+  updateFileNameLabels(system.lastUploadFileName || "No file uploaded");
+}
+
+function updateFileNameLabels(fileName) {
+  const value = fileName || "No file uploaded";
+  qs("#activeFileChip").textContent = value;
+  qs("#dataTabFileName").textContent = value;
+  qs("#classificationFileName").textContent = value;
+  qs("#overviewFileName").textContent = value;
+  qs("#systemDataActiveFile").textContent = value;
+}
+
+function showDashboard() {
+  closeClassifierStream();
+  qs("#dashboardPage").classList.add("active");
+  qs("#systemPage").classList.remove("active");
+  loadDashboard().catch((error) => toast(error.message));
+}
+
+function showSystemPage() {
+  qs("#dashboardPage").classList.remove("active");
+  qs("#systemPage").classList.add("active");
+}
+
+async function switchSystemTab(tab) {
+  state.activeTab = tab;
+  qsa(".tab").forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
+  const panelMap = {
+    overview: "#overviewTab",
+    "system-data": "#systemDataTab",
+    "personal-data": "#personalDataTab",
+    "system-context": "#systemContextTab",
+    pdpl: "#pdplTab",
+    "system-links": "#systemLinksTab",
+  };
+  Object.entries(panelMap).forEach(([key, selector]) => qs(selector).classList.toggle("active", key === tab));
+
+  if (!state.currentSystem) return;
+  if (tab === "overview") await loadOverview();
+  if (tab === "system-data") await loadRecords();
+  if (tab === "personal-data") await loadPersonalData();
+  if (tab === "system-context") await loadContext();
+  if (tab === "pdpl") await loadPdpl();
+  if (tab === "system-links") await loadLinks();
+}
+
+async function loadOverview() {
+  await reloadCurrentSystem();
+  renderOverview(state.currentSystem.summary);
+}
+
+function renderOverview(summary) {
+  if (!summary) return;
+  qs("#overviewClassified").textContent = summary.classified;
+  qs("#overviewClassifiedPct").textContent = `${summary.classifiedPercentage}%`;
+  qs("#overviewPersonal").textContent = summary.personal;
+  qs("#overviewPersonalPct").textContent = `${summary.personalPercentage}%`;
+  qs("#overviewPending").textContent = summary.pending;
+  qs("#overviewPendingPct").textContent = `${summary.pendingPercentage}%`;
+  qs("#overviewReviewQueue").textContent = summary.reviewQueue;
+  qs("#overviewLowConfidence").textContent = summary.lowConfidence;
+  qs("#overviewPolicyCount").textContent = summary.policyRecommendationCount;
+  qs("#overviewTablesPersonal").textContent = summary.tablesWithPersonalData;
+  qs("#overviewProgressCircle").setAttribute("stroke-dasharray", `${summary.classificationProgress} ${100 - summary.classificationProgress}`);
+  qs("#overviewProgressLabel").textContent = `${summary.classificationProgress}%`;
+  updateClassificationMetrics(summary);
+  updateFileNameLabels(state.currentSystem?.lastUploadFileName || "No file uploaded");
+  renderChart(qs("#confidentialityChart"), summary.confidentiality || {});
+  renderChart(qs("#personalChart"), summary.personalDistribution || {});
+}
+
+function renderChart(container, values) {
+  container.replaceChildren();
+  const max = Math.max(1, ...Object.values(values).map(Number));
+  for (const [label, count] of Object.entries(values)) {
+    const row = document.createElement("div");
+    row.className = "chart-row";
+    const labelNode = document.createElement("span");
+    labelNode.textContent = label;
+    const progress = document.createElement("progress");
+    progress.max = max;
+    progress.value = Number(count || 0);
+    const countNode = document.createElement("strong");
+    countNode.textContent = count;
+    row.append(labelNode, progress, countNode);
+    container.append(row);
+  }
+}
+
+async function loadRecords() {
+  if (!state.currentSystem) return;
+  const params = new URLSearchParams({
+    page: state.page,
+    pageSize: state.pageSize,
+    search: state.search,
+    sortBy: state.sortBy,
+    sortDir: state.sortDir,
+  });
+  const result = await api(`/api/systems/${state.currentSystem.id}/records?${params.toString()}`);
+  state.records = result.records;
+  state.originalColumns = result.originalColumns;
+  state.totalPages = result.totalPages;
+  state.totalRecords = result.total;
+  renderRecordsTable();
+  renderOverview(result.summary);
+}
+
+function renderRecordsTable() {
+  renderTable({
+    head: qs("#recordsTableHead"),
+    body: qs("#recordsTableBody"),
+    records: state.records,
+    columns: systemDataColumns(),
+    editable: state.viewMode === "edit",
+  });
+  qs("#recordCounter").textContent = `${state.totalRecords} records`;
+  qs("#paginationLabel").textContent = `Page ${state.page} of ${state.totalPages}`;
+  qs("#prevPageButton").disabled = state.page <= 1;
+  qs("#nextPageButton").disabled = state.page >= state.totalPages;
+}
+
+function systemDataColumns() {
+  const original = state.originalColumns.map((column) => ({
+    key: `original.${column}`,
+    label: column,
+    originalColumn: column,
+    sortable: true,
+  }));
+  return [
+    ...original,
+    { key: "confidentiality", label: "Confidentiality", sortable: true, editable: true },
+    { key: "confReason", label: "Conf Reason", className: "reason-cell", editable: true },
+    { key: "personalData", label: "Personal Data", sortable: true, editable: true },
+    { key: "personalReason", label: "Personal Reason", className: "reason-cell", editable: true },
+    { key: "personalDataType", label: "Personal Data Type", sortable: true },
+    { key: "review", label: "Review" },
+  ];
+}
+
+async function loadPersonalData() {
+  if (!state.currentSystem) return;
+  const result = await api(`/api/systems/${state.currentSystem.id}/records?personalOnly=true&page=1&pageSize=100`);
+  state.personalRecords = result.records;
+  renderPersonalDataTable();
+}
+
+function renderPersonalDataTable() {
+  renderTable({
+    head: qs("#personalTableHead"),
+    body: qs("#personalTableBody"),
+    records: state.personalRecords,
+    columns: [
+      { key: "tableName", label: "Table" },
+      { key: "columnName", label: "Column" },
+      { key: "dataType", label: "Data Type" },
+      { key: "confidentiality", label: "Confidentiality" },
+      { key: "confReason", label: "Conf Reason", className: "reason-cell" },
+      { key: "personalReason", label: "Personal Reason", className: "reason-cell" },
+      { key: "personalDataType", label: "Personal Data Type" },
+      { key: "pseudonymizable", label: "Can be pseudonymized" },
+      { key: "anonymizable", label: "Can be anonymized" },
+      { key: "specialCategory", label: "Special Category" },
+      { key: "auditTrail", label: "Audit Trail", className: "reason-cell" },
+      { key: "needsReview", label: "Needs Review" },
+      { key: "confidenceScore", label: "Confidence Score" },
+      { key: "policyRecommendation", label: "Policy Recommendation", className: "policy-cell" },
+      { key: "personalApproval", label: "Approval" },
+    ],
+    editable: false,
+  });
+}
+
+/* Table rendering is shared by System Data and Personal Data so sorting, badges,
+ * edit controls, and workflow actions stay consistent across the platform.
+ */
+function renderTable({ head, body, records, columns, editable }) {
+  head.replaceChildren();
+  body.replaceChildren();
+
+  const headerRow = document.createElement("tr");
+  for (const column of columns) {
+    const th = document.createElement("th");
+    if (column.sortable) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = sortLabel(column.label, column.originalColumn || column.key);
+      button.addEventListener("click", () => sortBy(column.originalColumn || column.key));
+      th.append(button);
+    } else {
+      th.textContent = column.label;
+    }
+    headerRow.append(th);
+  }
+  head.append(headerRow);
+
+  for (const record of records) {
+    const tr = document.createElement("tr");
+    if (record.id === state.liveUpdatedRecordId) tr.classList.add("row-live-update");
+    for (const column of columns) {
+      const td = document.createElement("td");
+      if (column.className) td.className = column.className;
+      renderCell(td, record, column, editable);
+      tr.append(td);
+    }
+    body.append(tr);
+  }
+}
+
+function renderCell(td, record, column, editable) {
+  if (column.originalColumn) {
+    td.textContent = record.original[column.originalColumn] ?? "";
+    return;
+  }
+
+  if (column.key === "review") {
+    td.append(reviewControl(record, editable));
+    return;
+  }
+
+  if (column.key === "personalApproval") {
+    td.append(personalApprovalControl(record));
+    return;
+  }
+
+  if (editable && column.editable) {
+    td.append(editControl(record, column.key));
+    return;
+  }
+
+  if (column.key === "confidentiality") {
+    td.append(badge(record.confidentiality || "Pending", confidentialityClass(record.confidentiality)));
+    return;
+  }
+
+  if (["personalData", "pseudonymizable", "anonymizable", "specialCategory"].includes(column.key)) {
+    const value = record[column.key] || "No";
+    td.append(badge(value, value === "Yes" ? "badge-yes" : "badge-no"));
+    return;
+  }
+
+  if (column.key === "needsReview" || column.key === "pushToClient") {
+    const value = record[column.key] ? "Yes" : "No";
+    td.append(badge(value, value === "Yes" ? "badge-yes" : "badge-no"));
+    return;
+  }
+
+  if (column.key === "confidenceScore") {
+    td.textContent = record.confidenceScore == null ? "" : `${Math.round(Number(record.confidenceScore) * 100)}%`;
+    return;
+  }
+
+  td.textContent = record[column.key] ?? "";
+}
+
+function reviewControl(record, editable) {
+  const reviewed = record.systemReviewStatus === "Approved";
+  const button = document.createElement("button");
+  button.className = `review-toggle ${reviewed ? "reviewed" : ""}`;
+  button.type = "button";
+  button.textContent = reviewed ? "Approved" : "Review";
+  button.title = editable ? "Toggle review state" : "Switch to Edit View to update review state";
+  button.disabled = !editable;
+  if (editable) {
+    button.addEventListener("click", () => {
+      updateRecord(record.id, { reviewed: !reviewed }).catch((error) => toast(error.message));
+    });
+  }
+  return button;
+}
+
+function personalApprovalControl(record) {
+  const approved = record.personalReviewStatus === "Approved";
+  const button = document.createElement("button");
+  button.className = `review-toggle ${approved ? "reviewed" : ""}`;
+  button.type = "button";
+  button.textContent = approved ? "Approved" : "Approve";
+  button.title = "Update PDPL obligation review status for this personal data item";
+  button.addEventListener("click", () => {
+    updateRecord(record.id, { personalApproved: !approved }).catch((error) => toast(error.message));
+  });
+  return button;
+}
+
+function editControl(record, key) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "inline-edit";
+  let input;
+  if (key === "confidentiality") {
+    input = document.createElement("select");
+    ["Public", "Confidential", "Secret", "Top Secret", "Pending"].forEach((value) => input.add(new Option(value, value)));
+    input.value = record.confidentiality || "Pending";
+  } else if (key === "personalData") {
+    input = document.createElement("select");
+    ["Yes", "No"].forEach((value) => input.add(new Option(value, value)));
+    input.value = record.personalData || "No";
+  } else if (key === "confReason" || key === "personalReason") {
+    input = document.createElement("textarea");
+    input.rows = 3;
+    input.value = record[key] || "";
+  } else if (key === "reviewStatus") {
+    input = document.createElement("select");
+    ["Unreviewed", "Pending Review", "In Review", "Approved", "Rejected"].forEach((value) => input.add(new Option(value, value)));
+    input.value = record.reviewStatus || "Unreviewed";
+  } else if (key === "needsReview" || key === "pushToClient") {
+    input = document.createElement("select");
+    [["Yes", "true"], ["No", "false"]].forEach(([label, value]) => input.add(new Option(label, value)));
+    input.value = record[key] ? "true" : "false";
+  } else {
+    input = document.createElement("input");
+    input.value = record[key] || "";
+  }
+
+  input.addEventListener("change", () => {
+    const raw = input.value;
+    const value = key === "needsReview" || key === "pushToClient" ? raw === "true" : raw;
+    updateRecord(record.id, { [key]: value }).catch((error) => toast(error.message));
+  });
+  wrapper.append(input);
+  return wrapper;
+}
+
+async function updateRecord(recordId, updates) {
+  const result = await api(`/api/records/${recordId}`, { method: "PUT", body: JSON.stringify(updates) });
+  state.records = state.records.map((record) => (record.id === recordId ? result.record : record));
+  state.personalRecords = state.personalRecords.map((record) => (record.id === recordId ? result.record : record));
+  renderRecordsTable();
+  if (state.activeTab === "personal-data") await loadPersonalData();
+  if (state.activeTab === "pdpl") await loadPdpl();
+  renderOverview(result.summary);
+}
+
+async function approvePersonalOnPage() {
+  if (!state.currentSystem) return;
+  const recordIds = state.personalRecords
+    .filter((record) => record.personalReviewStatus !== "Approved")
+    .map((record) => record.id);
+  if (!recordIds.length) {
+    toast("All personal-data records on this page are already approved.");
+    return;
+  }
+  const result = await api(`/api/systems/${state.currentSystem.id}/personal-approvals`, {
+    method: "POST",
+    body: JSON.stringify({ recordIds }),
+  });
+  state.personalRecords = result.records;
+  renderPersonalDataTable();
+  renderOverview(result.summary);
+  toast(`Approved ${recordIds.length} personal-data record${recordIds.length === 1 ? "" : "s"}.`);
+  if (state.activeTab === "pdpl") await loadPdpl();
+}
+
+function sortBy(key) {
+  if (state.sortBy === key) {
+    state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+  } else {
+    state.sortBy = key;
+    state.sortDir = "asc";
+  }
+  loadRecords();
+}
+
+function sortLabel(label, key) {
+  if (state.sortBy !== key) return label;
+  return `${label} ${state.sortDir === "asc" ? "ASC" : "DESC"}`;
+}
+
+/* SSE classification gives demos a real-time feel. The server streams row updates,
+ * progress, and summary changes as each batch completes.
+ */
+function startClassification(mode) {
+  if (!state.currentSystem) return;
+  closeClassifierStream();
+  const params = new URLSearchParams({
+    mode,
+    page: state.page,
+    pageSize: Math.min(50, state.pageSize),
+    search: state.search,
+    sortBy: state.sortBy,
+    sortDir: state.sortDir,
+  });
+  const fileName = state.currentSystem.lastUploadFileName || "No file uploaded";
+  qs(".classification-panel").classList.add("is-running");
+  setClassificationStatus(`Classifying ${fileName}`, 0);
+  state.classifierStream = new EventSource(`/api/systems/${state.currentSystem.id}/classify-stream?${params.toString()}`);
+
+  state.classifierStream.addEventListener("start", (event) => {
+    const data = JSON.parse(event.data);
+    updateFileNameLabels(data.fileName || fileName);
+    setClassificationStatus(`Started ${data.total} records`, 0);
+  });
+
+  state.classifierStream.addEventListener("row", (event) => {
+    const data = JSON.parse(event.data);
+    state.records = state.records.map((record) => (record.id === data.record.id ? data.record : record));
+    state.liveUpdatedRecordId = data.record.id;
+    setClassificationStatus(`Processed ${data.processed} of ${data.total}`, data.percentage);
+    renderRecordsTable();
+    setTimeout(() => {
+      if (state.liveUpdatedRecordId === data.record.id) {
+        state.liveUpdatedRecordId = null;
+        renderRecordsTable();
+      }
+    }, 1200);
+  });
+
+  state.classifierStream.addEventListener("progress", (event) => {
+    const data = JSON.parse(event.data);
+    setClassificationStatus(`Processed ${data.processed} of ${data.total}`, data.percentage);
+    renderOverview(data.summary);
+  });
+
+  state.classifierStream.addEventListener("done", async (event) => {
+    const data = JSON.parse(event.data);
+    setClassificationStatus(`Complete: ${data.total} records`, 100);
+    renderOverview(data.summary);
+    closeClassifierStream();
+    qs(".classification-panel").classList.remove("is-running");
+    await reloadCurrentSystem();
+    await loadRecords();
+  });
+
+  state.classifierStream.addEventListener("error", (event) => {
+    const message = event.data ? JSON.parse(event.data).error : "Classification stream interrupted";
+    toast(message);
+    setClassificationStatus("Classification stopped", 0);
+    qs(".classification-panel").classList.remove("is-running");
+    closeClassifierStream();
+  });
+}
+
+function closeClassifierStream() {
+  if (state.classifierStream) {
+    state.classifierStream.close();
+    state.classifierStream = null;
+  }
+  const panel = qs(".classification-panel");
+  if (panel) panel.classList.remove("is-running");
+}
+
+function closeActionsMenu() {
+  const menu = qs(".actions-menu");
+  if (menu) menu.removeAttribute("open");
+}
+
+function setClassificationStatus(text, percentage) {
+  qs("#classificationStatus").textContent = text;
+  const value = Number(percentage || 0);
+  qs("#classificationProgress").value = value;
+  qs("#classificationPercentLabel").textContent = `${Math.round(value)}% classified`;
+  qs("#pendingPercentLabel").textContent = `${Math.max(0, 100 - Math.round(value))}% pending`;
+}
+
+function updateClassificationMetrics(summary) {
+  const classified = Number(summary?.classificationProgress || 0);
+  const pending = summary?.totalRecords ? Math.max(0, 100 - classified) : 0;
+  qs("#classificationProgress").value = classified;
+  qs("#classificationPercentLabel").textContent = `${classified}% classified`;
+  qs("#pendingPercentLabel").textContent = `${pending}% pending`;
+}
+
+async function loadContext() {
+  const result = await api(`/api/systems/${state.currentSystem.id}/context`);
+  const container = qs("#contextCards");
+  container.replaceChildren();
+  if (!result.points.length) {
+    container.append(emptyCard("No context points yet.", "Add system context to improve classification relevance."));
+    return;
+  }
+  for (const point of result.points) {
+    const card = document.createElement("article");
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = point.tag;
+    const remove = document.createElement("button");
+    remove.className = "btn btn-ghost";
+    remove.type = "button";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", async () => {
+      await api(`/api/context/${point.id}`, { method: "DELETE" });
+      await loadContext();
+    });
+    const content = document.createElement("p");
+    content.textContent = point.content;
+    header.append(title, remove);
+    card.append(header, content);
+    container.append(card);
+  }
+}
+
+async function loadPdpl() {
+  const result = await api(`/api/systems/${state.currentSystem.id}/pdpl`);
+  qs("#pdplCompliant").textContent = result.status.compliant;
+  qs("#pdplNeedsReview").textContent = result.status.needsReview;
+  qs("#pdplNonCompliant").textContent = result.status.nonCompliant;
+  qs("#pdplForm").governanceNotes.value = result.notes.governanceNotes || "";
+  qs("#pdplForm").dataSubjectRightsCoverage.value = result.notes.dataSubjectRightsCoverage || "Needs Review";
+  qs("#pdplForm").consentTrackingStatus.value = result.notes.consentTrackingStatus || "Needs Review";
+  qs("#pdplForm").crossBorderTransferFlags.value = result.notes.crossBorderTransferFlags || "No Flags Recorded";
+
+  const body = qs("#pdplObligationsBody");
+  body.replaceChildren();
+  for (const item of result.obligations) {
+    const tr = document.createElement("tr");
+    [item.tableName, item.columnName, item.personalDataType, item.policyRecommendation, item.reviewStatus].forEach((value, index) => {
+      const td = document.createElement("td");
+      if (index === 4) {
+        td.append(badge(value || "Needs Review", value === "Approved" ? "badge-yes" : "badge-pending"));
+      } else {
+        td.textContent = value || "";
+      }
+      tr.append(td);
+    });
+    body.append(tr);
+  }
+}
+
+async function loadLinks() {
+  const result = await api(`/api/systems/${state.currentSystem.id}/links`);
+  const container = qs("#systemLinksCards");
+  container.replaceChildren();
+  if (!result.links.length) {
+    container.append(emptyCard("No links stored yet.", "Add documentation, API, or governance policy references."));
+    return;
+  }
+  for (const link of result.links) {
+    const card = document.createElement("article");
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = link.title;
+    const actions = document.createElement("div");
+    const open = document.createElement("a");
+    open.className = "btn btn-secondary";
+    open.href = link.url;
+    open.target = "_blank";
+    open.rel = "noreferrer";
+    open.textContent = "Open";
+    const remove = document.createElement("button");
+    remove.className = "btn btn-ghost";
+    remove.type = "button";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", async () => {
+      await api(`/api/links/${link.id}`, { method: "DELETE" });
+      await loadLinks();
+    });
+    const category = badge(link.category, "badge-pending");
+    const description = document.createElement("p");
+    description.textContent = link.description || link.url;
+    actions.append(open, remove);
+    header.append(title, actions);
+    card.append(header, category, description);
+    container.append(card);
+  }
+}
+
+function emptyCard(title, description) {
+  const card = document.createElement("article");
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const p = document.createElement("p");
+  p.textContent = description;
+  card.append(strong, p);
+  return card;
+}
+
+function badge(text, className) {
+  const span = document.createElement("span");
+  span.className = `badge ${className}`;
+  span.textContent = text;
+  return span;
+}
+
+function confidentialityClass(value) {
+  if (value === "Public") return "badge-public";
+  if (value === "Confidential") return "badge-confidential";
+  if (value === "Secret") return "badge-secret";
+  if (value === "Top Secret") return "badge-top-secret";
+  return "badge-pending";
+}
+
+function formJson(form) {
+  const data = new FormData(form);
+  const result = {};
+  for (const [key, value] of data.entries()) {
+    result[key] = value;
+  }
+  qsa("input[type='checkbox']", form).forEach((input) => {
+    result[input.name] = input.checked;
+  });
+  return result;
+}
+
+function wordCount(value) {
+  return String(value || "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+function debounce(fn, wait) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), wait);
+  };
+}
+
+function toast(message) {
+  const node = qs("#toast");
+  node.textContent = message;
+  node.classList.add("show");
+  clearTimeout(node._timer);
+  node._timer = setTimeout(() => node.classList.remove("show"), 4200);
+}
