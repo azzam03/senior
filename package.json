@@ -7,7 +7,7 @@
     "build": "echo \"No build step required\"",
     "start": "node --no-warnings server.js",
     "dev": "node --no-warnings server.js",
-    "codex:start": "node scripts/start-codex.js",
+    "platform:start": "node scripts/start-platform.js",
     "verify": "node scripts/verify-platform.js"
   },
   "dependencies": {

@@ -108,22 +108,46 @@ button:disabled {
 .auth-brand {
   max-width: 780px;
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr);
-  gap: 20px;
-  align-items: start;
+  gap: 18px;
 }
 
-.brand-mark {
-  width: 50px;
-  height: 50px;
+.brand-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  color: var(--ink);
+}
+
+.brand-logo strong {
+  color: var(--ink);
+  font-size: 0.98rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.logo-grid {
+  width: 19px;
+  height: 19px;
   display: grid;
-  place-items: center;
-  flex: 0 0 50px;
-  border-radius: var(--radius);
-  background: linear-gradient(135deg, var(--primary), var(--teal));
-  color: #ffffff;
-  font-weight: 900;
-  box-shadow: 0 10px 24px rgba(24, 88, 201, 0.18);
+  grid-template-columns: repeat(2, 7px);
+  grid-template-rows: repeat(2, 7px);
+  gap: 5px;
+}
+
+.logo-grid i {
+  display: block;
+  border-radius: 2px;
+  background: #d5dde9;
+}
+
+.logo-grid i:nth-child(2),
+.logo-grid i:nth-child(3) {
+  background: #c7d0dd;
+}
+
+.logo-grid i:nth-child(4) {
+  background: #3367d6;
 }
 
 .auth-brand h1 {
@@ -1370,10 +1394,6 @@ progress::-moz-progress-bar {
   .auth-screen {
     grid-template-columns: 1fr;
     padding: 24px;
-  }
-
-  .auth-brand {
-    grid-template-columns: 1fr;
   }
 
   .auth-brand h1 {
