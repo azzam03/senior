@@ -1104,10 +1104,15 @@ app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, as
 
     let processed = 0;
     let fallbackWarningSent = false;
+    let apiCreditWarningSent = false;
     for (const record of records) {
       let results;
       try {
         results = await classifyRecords([record], contextPoints);
+        if (results.apiWarning?.code === "OPENAI_NO_CREDITS" && !apiCreditWarningSent) {
+          apiCreditWarningSent = true;
+          send("warning", results.apiWarning);
+        }
       } catch (error) {
         results = new Map();
         results.set(record.id, classifyRecordLocally(record, contextPoints));

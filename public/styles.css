@@ -1338,6 +1338,9 @@ progress::-moz-progress-bar {
   bottom: 18px;
   z-index: 20;
   max-width: 420px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
   padding: 12px 14px;
   border-radius: var(--radius);
   background: #111827;
@@ -1352,6 +1355,36 @@ progress::-moz-progress-bar {
 .toast.show {
   opacity: 1;
   transform: translateY(0);
+  pointer-events: auto;
+}
+
+.toast span {
+  flex: 1;
+}
+
+.toast-danger {
+  border: 1px solid #991b1b;
+  background: var(--red);
+}
+
+.toast-close {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.toast-close:hover {
+  background: rgba(255, 255, 255, 0.24);
 }
 
 @keyframes rowPulse {

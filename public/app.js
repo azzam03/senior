@@ -896,6 +896,13 @@ function startClassification(mode) {
 
   state.classifierStream.addEventListener("warning", (event) => {
     const data = JSON.parse(event.data);
+    if (data.code === "OPENAI_NO_CREDITS") {
+      toast(data.message || "No OpenAI API credits are available.", {
+        variant: "danger",
+        persistent: true,
+      });
+      return;
+    }
     toast(data.message || "Classification continued with fallback rules.");
   });
 
@@ -1106,10 +1113,38 @@ function debounce(fn, wait) {
   };
 }
 
-function toast(message) {
+function toast(message, options = {}) {
   const node = qs("#toast");
-  node.textContent = message;
+  const persistent = Boolean(options.persistent);
+  if (node.dataset.locked === "true" && !persistent) return;
+  node.className = "toast";
+  node.replaceChildren();
+  node.dataset.locked = persistent ? "true" : "false";
+  node.setAttribute("role", options.variant === "danger" ? "alert" : "status");
+  if (options.variant === "danger") node.classList.add("toast-danger");
+  if (persistent) node.classList.add("toast-persistent");
+
+  const text = document.createElement("span");
+  text.textContent = message;
+  node.append(text);
+
+  if (persistent) {
+    const close = document.createElement("button");
+    close.className = "toast-close";
+    close.type = "button";
+    close.setAttribute("aria-label", "Dismiss notification");
+    close.textContent = "x";
+    close.addEventListener("click", () => {
+      node.classList.remove("show");
+      node.dataset.locked = "false";
+      clearTimeout(node._timer);
+    });
+    node.append(close);
+  }
+
   node.classList.add("show");
   clearTimeout(node._timer);
-  node._timer = setTimeout(() => node.classList.remove("show"), 4200);
+  if (!persistent) {
+    node._timer = setTimeout(() => node.classList.remove("show"), 4200);
+  }
 }

@@ -4,6 +4,7 @@ const { getDb } = require("./db");
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_TIMEOUT_MS = Math.max(5000, Number(process.env.OPENAI_TIMEOUT_MS || 25000));
+const OPENAI_NO_CREDITS_CODE = "OPENAI_NO_CREDITS";
 const CLASSIFICATION_POLICY_VERSION = "bahrain-pdpl-v3";
 const BAHRAIN_PDPL_REFERENCE_URL = "https://www.pdp.gov.bh/en/assets/pdf/regulations.pdf";
 
@@ -32,9 +33,19 @@ async function classifyRecords(records, contextPoints) {
   }
 
   if (missing.length) {
-    const classified = OPENAI_API_KEY
-      ? await classifyWithOpenAI(missing, contextPoints).catch(() => classifyWithLocalRules(missing, contextPoints))
-      : classifyWithLocalRules(missing, contextPoints);
+    let apiWarning = null;
+    let classified;
+    if (OPENAI_API_KEY) {
+      try {
+        classified = await classifyWithOpenAI(missing, contextPoints);
+      } catch (error) {
+        apiWarning = buildApiWarning(error);
+        classified = classifyWithLocalRules(missing, contextPoints);
+      }
+    } else {
+      classified = classifyWithLocalRules(missing, contextPoints);
+    }
+
     const upsert = db.prepare(
       `INSERT INTO classification_cache (cacheKey, tableName, columnName, contextHash, resultJson, createdAt, updatedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -47,6 +58,7 @@ async function classifyRecords(records, contextPoints) {
       upsert.run(cacheKey, record.tableName, record.columnName, contextHash, JSON.stringify(stripSource(result)), now, now);
       resultMap.set(record.id, result);
     }
+    if (apiWarning) resultMap.apiWarning = apiWarning;
   }
 
   return resultMap;
@@ -89,7 +101,14 @@ async function classifyWithOpenAI(records, contextPoints) {
   }
 
   if (!response.ok) {
-    throw new Error(`OpenAI classification failed with status ${response.status}`);
+    const payload = await readOpenAIError(response);
+    const error = new Error(openAIErrorMessage(response, payload));
+    error.status = response.status;
+    error.openAIError = payload?.error || null;
+    if (isNoCreditsOpenAIError(response, payload)) {
+      error.code = OPENAI_NO_CREDITS_CODE;
+    }
+    throw error;
   }
 
   const payload = await response.json();
@@ -112,6 +131,43 @@ async function classifyWithOpenAI(records, contextPoints) {
   }
 
   return map;
+}
+
+async function readOpenAIError(response) {
+  try {
+    return await response.json();
+  } catch (_error) {
+    return null;
+  }
+}
+
+function openAIErrorMessage(response, payload) {
+  const message = payload?.error?.message;
+  return message
+    ? `OpenAI classification failed: ${message}`
+    : `OpenAI classification failed with status ${response.status}`;
+}
+
+function isNoCreditsOpenAIError(response, payload) {
+  const error = payload?.error || {};
+  const code = String(error.code || "").toLowerCase();
+  const type = String(error.type || "").toLowerCase();
+  const message = String(error.message || "").toLowerCase();
+  if (code === "insufficient_quota" || type === "insufficient_quota") return true;
+  if (response.status !== 429) return false;
+  return /quota|billing|credit|insufficient/.test(`${code} ${type} ${message}`) && code !== "rate_limit_exceeded";
+}
+
+function buildApiWarning(error) {
+  if (error?.code === OPENAI_NO_CREDITS_CODE) {
+    return {
+      code: OPENAI_NO_CREDITS_CODE,
+      severity: "danger",
+      persistent: true,
+      message: "No OpenAI API credits are available. Classification continued with local rules.",
+    };
+  }
+  return null;
 }
 
 function buildPrompt(records, contextPoints) {
