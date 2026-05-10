@@ -177,11 +177,11 @@ async function main() {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(exportPath);
   const sheetNames = workbook.worksheets.map((sheet) => sheet.name);
-  const requiredSheets = ["Overall", "System Data", "Personal Data", "PDPL"];
+  const requiredSheets = ["Overall", "Data Classification", "Personal Data", "Links & General Info"];
   for (const sheet of requiredSheets) {
     if (!sheetNames.includes(sheet)) throw new Error(`Missing export sheet: ${sheet}`);
   }
-  const systemDataHeaders = workbook.getWorksheet("System Data").getRow(1).values.join("|");
+  const systemDataHeaders = workbook.getWorksheet("Data Classification").getRow(1).values.join("|");
   if (!systemDataHeaders.includes("Source") || !systemDataHeaders.includes("Retention")) {
     throw new Error("Export did not preserve uploaded Excel columns.");
   }

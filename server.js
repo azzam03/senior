@@ -16,7 +16,7 @@ const {
   backupDir,
 } = require("./src/db");
 const { parseMetadataFile, buildSystemDataExport } = require("./src/excel");
-const { classifyRecords } = require("./src/classifier");
+const { classifyRecords, classifyRecordLocally } = require("./src/classifier");
 
 const app = express();
 const upload = multer({
@@ -359,6 +359,26 @@ function getSystemSummary(systemId) {
     classificationProgress: pct(classified, total),
     completedSystems,
   };
+}
+
+function classificationNeedsReview(result) {
+  return (
+    Number(result.confidenceScore || 0) < 0.75 ||
+    result.personalData === "Yes" ||
+    /review needed|restricted access|consent required/i.test(result.policyRecommendation || "")
+  );
+}
+
+function updateSystemClassificationState(systemId) {
+  const db = getDb();
+  const summary = getSystemSummary(systemId);
+  db.prepare("UPDATE systems SET updatedAt = ?, status = ?, lastModifiedBy = ? WHERE id = ?").run(
+    nowIso(),
+    summary.pending === 0 && summary.totalRecords > 0 ? "Completed" : "In Progress",
+    "AI Classification Service",
+    systemId
+  );
+  return summary;
 }
 
 function countBy(rows, key, labels) {
@@ -987,10 +1007,25 @@ app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, as
     "X-Accel-Buffering": "no",
   });
 
+  let clientConnected = true;
+  req.on("close", () => {
+    clientConnected = false;
+  });
+
   const send = (event, payload) => {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    if (!clientConnected || res.writableEnded || res.destroyed) return false;
+    try {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      return true;
+    } catch (_error) {
+      clientConnected = false;
+      return false;
+    }
   };
+  const heartbeat = setInterval(() => {
+    send("heartbeat", { at: nowIso() });
+  }, 15000);
 
   try {
     const db = getDb();
@@ -999,7 +1034,7 @@ app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, as
     const pageOptions = {
       page: req.query.page || 1,
       pageSize: mode === "all" ? 100000 : Math.min(50, Number(req.query.pageSize || 50)),
-      search: req.query.search,
+      search: mode === "all" ? "" : req.query.search,
       sortBy: req.query.sortBy,
       sortDir: req.query.sortDir,
     };
@@ -1019,19 +1054,27 @@ app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, as
       return;
     }
 
-    const batchSize = 25;
+    const batchSize = 15;
     let processed = 0;
     for (let index = 0; index < records.length; index += batchSize) {
       const batch = records.slice(index, index + batchSize);
-      const results = await classifyRecords(batch, contextPoints);
+      let results;
+      try {
+        results = await classifyRecords(batch, contextPoints);
+      } catch (error) {
+        results = new Map();
+        for (const record of batch) {
+          results.set(record.id, classifyRecordLocally(record, contextPoints));
+        }
+        send("warning", {
+          message: `Batch ${Math.floor(index / batchSize) + 1} used local rules after AI classification failed.`,
+          detail: error.message || "Classification fallback used",
+        });
+      }
 
       for (const record of batch) {
-        const result = results.get(record.id);
-        if (!result) continue;
-        const needsReview =
-          Number(result.confidenceScore || 0) < 0.75 ||
-          result.personalData === "Yes" ||
-          /review needed|restricted access|consent required/i.test(result.policyRecommendation || "");
+        const result = results.get(record.id) || classifyRecordLocally(record, contextPoints);
+        const needsReview = classificationNeedsReview(result);
         db.prepare(
           `UPDATE data_records SET
              confidentiality = ?, confReason = ?, personalData = ?, personalReason = ?,
@@ -1068,26 +1111,27 @@ app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, as
         });
       }
 
+      const summary = updateSystemClassificationState(req.system.id);
+      db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+
       send("progress", {
         processed,
         total: records.length,
         percentage: pct(processed, records.length),
-        summary: getSystemSummary(req.system.id),
+        summary,
       });
     }
 
-    db.prepare("UPDATE systems SET updatedAt = ?, status = ?, lastModifiedBy = ? WHERE id = ?").run(
-      nowIso(),
-      getSystemSummary(req.system.id).pending === 0 ? "Completed" : "In Progress",
-      "AI Classification Service",
-      req.system.id
-    );
+    const summary = updateSystemClassificationState(req.system.id);
     db.exec("PRAGMA wal_checkpoint(PASSIVE)");
-    send("done", { total: records.length, summary: getSystemSummary(req.system.id) });
+    send("done", { total: records.length, summary });
   } catch (error) {
     send("error", { error: error.message || "Classification failed" });
   } finally {
-    res.end();
+    clearInterval(heartbeat);
+    if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
   }
 });
 
@@ -1095,12 +1139,14 @@ app.get("/api/systems/:id/export", requireAuth, requireSystemAccess, async (req,
   const db = getDb();
   const rows = db.prepare("SELECT * FROM data_records WHERE systemId = ? ORDER BY rowIndex").all(req.system.id).map(recordToApi);
   const pdpl = db.prepare("SELECT * FROM pdpl_notes WHERE systemId = ?").get(req.system.id);
+  const links = db.prepare("SELECT * FROM system_links WHERE systemId = ? ORDER BY category, title").all(req.system.id);
   const workbook = await buildSystemDataExport({
     system: req.system,
     rows,
     originalColumns: getOriginalColumns(req.system.id),
     summary: getSystemSummary(req.system.id),
     pdpl,
+    links,
   });
 
   const safeName = req.system.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "system";

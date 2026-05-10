@@ -325,4 +325,7 @@ function hashContext(contextPoints) {
 
 module.exports = {
   classifyRecords,
+  classifyRecordLocally(record, contextPoints = []) {
+    return localClassification(record.tableName, record.columnName, contextPoints);
+  },
 };

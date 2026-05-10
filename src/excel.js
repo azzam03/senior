@@ -102,19 +102,15 @@ function findColumn(columns, expected) {
   return columns.find((column) => String(column).toLowerCase().replace(/[^a-z0-9]/g, "") === target);
 }
 
-async function buildSystemDataExport({ system, rows, originalColumns, summary, pdpl }) {
+async function buildSystemDataExport({ system, rows, originalColumns, summary, pdpl, links = [] }) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "DATA CLASSIFICATION & GOVERNANCE PLATFORM";
   workbook.created = new Date();
 
   buildOverallSheet(workbook, { system, summary, pdpl });
-  buildDataSheet(workbook, "System Data", rows, originalColumns, false);
+  buildDataSheet(workbook, "Data Classification", rows, originalColumns, false);
   buildDataSheet(workbook, "Personal Data", rows.filter((row) => row.personalData === "Yes"), originalColumns, true);
-  buildPdplSheet(workbook, {
-    system,
-    rows: rows.filter((row) => row.personalData === "Yes"),
-    pdpl,
-  });
+  buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links });
 
   return workbook;
 }
@@ -354,6 +350,106 @@ function buildDataSheet(workbook, name, rows, originalColumns, personalOnly) {
     from: "A1",
     to: `${sheet.getColumn(headers.length).letter}1`,
   };
+}
+
+function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links }) {
+  const sheet = workbook.addWorksheet("Links & General Info", {
+    views: [{ showGridLines: false }],
+  });
+  sheet.columns = [
+    { width: 28 },
+    { width: 34 },
+    { width: 24 },
+    { width: 48 },
+    { width: 22 },
+    { width: 28 },
+  ];
+
+  sheet.mergeCells("A1:F1");
+  sheet.getCell("A1").value = `${system.name} - Links and General Information`;
+  sheet.getCell("A1").font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
+  sheet.getCell("A1").fill = fill("0F766E");
+  sheet.getCell("A1").alignment = { vertical: "middle" };
+  sheet.getRow(1).height = 30;
+
+  addSectionHeader(sheet, 3, "System Information");
+  addSummaryTable(sheet, 4, [
+    ["Field", "Value"],
+    ["System Name", system.name],
+    ["Responsible Owner", system.owner],
+    ["DBA", system.dba],
+    ["Owner Email", system.ownerEmail],
+    ["System Group", system.systemGroup],
+    ["Assigned Consultant", system.assignedConsultant || ""],
+    ["Source System Reference", system.sourceSystemRef || ""],
+    ["Target System Reference", system.targetSystemRef || ""],
+    ["Related System Links", system.relatedSystemLinks || ""],
+    ["Uploaded File", system.lastUploadFileName || "No file uploaded"],
+    ["Status", system.status],
+  ]);
+
+  addSectionHeader(sheet, 18, "Classification Totals");
+  addSummaryTable(sheet, 19, [
+    ["Metric", "Value"],
+    ["Total Records", summary.totalRecords],
+    ["Fully Classified", summary.classified],
+    ["Pending Classification", summary.pending],
+    ["Personal Data Records", summary.personal],
+    ["Review Queue", summary.reviewQueue],
+    ["Low Confidence", summary.lowConfidence],
+    ["Tables With Personal Data", summary.tablesWithPersonalData],
+  ]);
+
+  addSectionHeader(sheet, 29, "PDPL General Notes");
+  addSummaryTable(sheet, 30, [
+    ["Indicator", "Status"],
+    ["Data Subject Rights Coverage", pdpl?.dataSubjectRightsCoverage || "Needs Review"],
+    ["Consent Tracking Status", pdpl?.consentTrackingStatus || "Needs Review"],
+    ["Cross-Border Transfer Flags", pdpl?.crossBorderTransferFlags || "No Flags Recorded"],
+    ["Governance Notes", pdpl?.governanceNotes || ""],
+  ]);
+
+  addSectionHeader(sheet, 37, "Reference Links");
+  const headerRowNumber = 38;
+  const headers = ["Title", "URL", "Category", "Description", "Created By", "Updated At"];
+  sheet.getRow(headerRowNumber).values = [null, ...headers];
+  sheet.getRow(headerRowNumber).height = 24;
+  sheet.getRow(headerRowNumber).eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = fill("1D4ED8");
+    cell.border = border("93C5FD");
+    cell.alignment = { vertical: "middle", horizontal: "center" };
+  });
+
+  if (links.length) {
+    links.forEach((link) => {
+      const added = sheet.addRow([
+        link.title || "",
+        link.url || "",
+        link.category || "",
+        link.description || "",
+        link.createdBy || "",
+        link.updatedAt || "",
+      ]);
+      added.eachCell((cell) => {
+        cell.border = border("E2E8F0");
+        cell.alignment = { vertical: "top", wrapText: true };
+      });
+      added.getCell(2).font = { color: { argb: "FF1D4ED8" }, underline: true };
+    });
+  } else {
+    const added = sheet.addRow(["No links stored", "", "", "", "", ""]);
+    added.eachCell((cell) => {
+      cell.border = border("E2E8F0");
+      cell.alignment = { vertical: "top", wrapText: true };
+    });
+  }
+
+  sheet.autoFilter = {
+    from: `A${headerRowNumber}`,
+    to: `F${headerRowNumber}`,
+  };
+  applyOuterBorders(sheet, `A1:F${Math.max(headerRowNumber + Math.max(links.length, 1), headerRowNumber)}`);
 }
 
 function buildPdplSheet(workbook, { system, rows, pdpl }) {

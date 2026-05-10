@@ -470,6 +470,7 @@ async function loadOverview() {
 
 function renderOverview(summary) {
   if (!summary) return;
+  const classificationProgress = clampPercent(summary.classificationProgress);
   qs("#overviewClassified").textContent = summary.classified;
   qs("#overviewClassifiedPct").textContent = `${summary.classifiedPercentage}%`;
   qs("#overviewPersonal").textContent = summary.personal;
@@ -480,30 +481,63 @@ function renderOverview(summary) {
   qs("#overviewLowConfidence").textContent = summary.lowConfidence;
   qs("#overviewPolicyCount").textContent = summary.policyRecommendationCount;
   qs("#overviewTablesPersonal").textContent = summary.tablesWithPersonalData;
-  qs("#overviewProgressCircle").setAttribute("stroke-dasharray", `${summary.classificationProgress} ${100 - summary.classificationProgress}`);
-  qs("#overviewProgressLabel").textContent = `${summary.classificationProgress}%`;
-  updateClassificationMetrics(summary);
+  qs("#overviewProgressCircle").setAttribute("stroke-dasharray", `${classificationProgress} ${100 - classificationProgress}`);
+  qs("#overviewProgressLabel").textContent = `${classificationProgress}%`;
+  updateClassificationMetrics({ ...summary, classificationProgress });
   updateFileNameLabels(state.currentSystem?.lastUploadFileName || "No file uploaded");
-  renderChart(qs("#confidentialityChart"), summary.confidentiality || {});
-  renderChart(qs("#personalChart"), summary.personalDistribution || {});
+  renderChart(qs("#confidentialityChart"), summary.confidentiality || {}, [
+    "Confidential",
+    "Secret",
+    "Top Secret",
+    "Public",
+    "Pending",
+  ]);
+  renderChart(qs("#personalChart"), summary.personalDistribution || {}, ["Has Personal Data", "No Personal Data"]);
 }
 
-function renderChart(container, values) {
+function renderChart(container, values, preferredOrder = []) {
   container.replaceChildren();
-  const max = Math.max(1, ...Object.values(values).map(Number));
-  for (const [label, count] of Object.entries(values)) {
+  const orderedLabels = [
+    ...preferredOrder,
+    ...Object.keys(values).filter((label) => !preferredOrder.includes(label)),
+  ];
+  const entries = orderedLabels.map((label) => [label, Number(values[label] || 0)]);
+  const total = entries.reduce((sum, [, count]) => sum + count, 0);
+
+  if (!entries.length || total === 0) {
+    const empty = document.createElement("div");
+    empty.className = "chart-empty";
+    empty.textContent = "No data available yet";
+    container.append(empty);
+    return;
+  }
+
+  for (const [label, count] of entries) {
+    const percentage = clampPercent((count / total) * 100);
     const row = document.createElement("div");
-    row.className = "chart-row";
+    row.className = `chart-row ${chartClass(label)}`;
     const labelNode = document.createElement("span");
     labelNode.textContent = label;
-    const progress = document.createElement("progress");
-    progress.max = max;
-    progress.value = Number(count || 0);
+    const bar = document.createElement("div");
+    bar.className = "chart-bar";
+    const fill = document.createElement("i");
+    fill.style.width = `${percentage}%`;
+    bar.append(fill);
     const countNode = document.createElement("strong");
-    countNode.textContent = count;
-    row.append(labelNode, progress, countNode);
+    countNode.textContent = `${count} (${percentage}%)`;
+    row.append(labelNode, bar, countNode);
     container.append(row);
   }
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function chartClass(label) {
+  return `chart-${String(label).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "item"}`;
 }
 
 async function loadRecords() {
@@ -793,13 +827,13 @@ function startClassification(mode) {
     mode,
     page: state.page,
     pageSize: Math.min(50, state.pageSize),
-    search: state.search,
+    search: mode === "all" ? "" : state.search,
     sortBy: state.sortBy,
     sortDir: state.sortDir,
   });
   const fileName = state.currentSystem.lastUploadFileName || "No file uploaded";
   qs(".classification-panel").classList.add("is-running");
-  setClassificationStatus(`Classifying ${fileName}`, 0);
+  setClassificationStatus(mode === "all" ? `Classifying all rows in ${fileName}` : `Classifying current page in ${fileName}`, 0);
   state.classifierStream = new EventSource(`/api/systems/${state.currentSystem.id}/classify-stream?${params.toString()}`);
 
   state.classifierStream.addEventListener("start", (event) => {
@@ -826,6 +860,15 @@ function startClassification(mode) {
     const data = JSON.parse(event.data);
     setClassificationStatus(`Processed ${data.processed} of ${data.total}`, data.percentage);
     renderOverview(data.summary);
+  });
+
+  state.classifierStream.addEventListener("warning", (event) => {
+    const data = JSON.parse(event.data);
+    toast(data.message || "Classification continued with fallback rules.");
+  });
+
+  state.classifierStream.addEventListener("heartbeat", () => {
+    // Keeps long classification runs alive behind proxies without changing UI state.
   });
 
   state.classifierStream.addEventListener("done", async (event) => {
