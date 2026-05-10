@@ -493,6 +493,37 @@ function renderOverview(summary) {
     "Pending",
   ]);
   renderChart(qs("#personalChart"), summary.personalDistribution || {}, ["Has Personal Data", "No Personal Data"]);
+  renderPersonalTypeSummary(summary.personalDataTypes || {});
+}
+
+function renderPersonalTypeSummary(values) {
+  const container = qs("#personalTypeSummary");
+  container.replaceChildren();
+  const entries = Object.entries(values || {})
+    .map(([label, count]) => [label, Number(count || 0)])
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+  if (!entries.length) {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    const count = document.createElement("strong");
+    label.textContent = "No personal data identified";
+    count.textContent = "0";
+    row.append(label, count);
+    container.append(row);
+    return;
+  }
+
+  for (const [labelText, countValue] of entries) {
+    const row = document.createElement("div");
+    const label = document.createElement("span");
+    const count = document.createElement("strong");
+    label.textContent = labelText;
+    count.textContent = countValue;
+    row.append(label, count);
+    container.append(row);
+  }
 }
 
 function renderChart(container, values, preferredOrder = []) {
@@ -847,6 +878,7 @@ function startClassification(mode) {
     state.records = state.records.map((record) => (record.id === data.record.id ? data.record : record));
     state.liveUpdatedRecordId = data.record.id;
     setClassificationStatus(`Processed ${data.processed} of ${data.total}`, data.percentage);
+    if (data.summary) renderOverview(data.summary);
     renderRecordsTable();
     setTimeout(() => {
       if (state.liveUpdatedRecordId === data.record.id) {
@@ -881,12 +913,23 @@ function startClassification(mode) {
     await loadRecords();
   });
 
-  state.classifierStream.addEventListener("error", (event) => {
-    const message = event.data ? JSON.parse(event.data).error : "Classification stream interrupted";
+  state.classifierStream.addEventListener("classification-error", async (event) => {
+    const message = event.data ? JSON.parse(event.data).error : "Classification failed";
     toast(message);
     setClassificationStatus("Classification stopped", 0);
     qs(".classification-panel").classList.remove("is-running");
     closeClassifierStream();
+    await reloadCurrentSystem().catch(() => null);
+    await loadRecords().catch(() => null);
+  });
+
+  state.classifierStream.addEventListener("error", async () => {
+    toast("Classification connection interrupted. Saved rows were kept.");
+    setClassificationStatus("Connection interrupted; saved rows kept", qs("#classificationProgress").value);
+    qs(".classification-panel").classList.remove("is-running");
+    closeClassifierStream();
+    await reloadCurrentSystem().catch(() => null);
+    await loadRecords().catch(() => null);
   });
 }
 

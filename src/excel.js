@@ -171,17 +171,24 @@ function buildOverallSheet(workbook, { system, summary, pdpl }) {
     ["Pending", summary.confidentiality.Pending || 0],
   ]);
 
-  addSectionHeader(sheet, 29, "Governance and PDPL Summary");
-  addSummaryTable(sheet, 30, [
+  const personalTypeRows = personalDataTypeRows(summary);
+  const personalTypesStart = 29;
+  addSectionHeader(sheet, personalTypesStart, "Personal Data Type Counts");
+  addSummaryTable(sheet, personalTypesStart + 1, personalTypeRows);
+
+  const governanceStart = personalTypesStart + personalTypeRows.length + 3;
+  const governanceRows = [
     ["Indicator", "Status"],
     ["Data Subject Rights Coverage", pdpl?.dataSubjectRightsCoverage || "Needs Review"],
     ["Consent Tracking Status", pdpl?.consentTrackingStatus || "Needs Review"],
     ["Cross-Border Transfer Flags", pdpl?.crossBorderTransferFlags || "No Flags Recorded"],
     ["Policy Recommendations", summary.policyRecommendationCount],
     ["Classification Progress", `${summary.classificationProgress}%`],
-  ]);
+  ];
+  addSectionHeader(sheet, governanceStart, "Governance and PDPL Summary");
+  addSummaryTable(sheet, governanceStart + 1, governanceRows);
 
-  applyOuterBorders(sheet, "A1:F36");
+  applyOuterBorders(sheet, `A1:F${governanceStart + governanceRows.length + 1}`);
 }
 
 function addKeyValue(sheet, row, leftKey, leftValue, rightKey, rightValue) {
@@ -217,6 +224,18 @@ function addMetricCard(sheet, row, col, card) {
       sheet.getCell(r, c).border = border("BFDBFE");
     }
   });
+}
+
+function personalDataTypeRows(summary) {
+  const distribution = summary?.personalDataTypes || {};
+  const entries = Object.entries(distribution)
+    .map(([label, count]) => [label || "Personal Data", Number(count || 0)])
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  return [
+    ["Personal Data Type", "Count"],
+    ...(entries.length ? entries : [["No personal data identified", 0]]),
+  ];
 }
 
 function addSummaryTable(sheet, startRow, values) {
@@ -400,17 +419,25 @@ function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links 
     ["Tables With Personal Data", summary.tablesWithPersonalData],
   ]);
 
-  addSectionHeader(sheet, 29, "PDPL General Notes");
-  addSummaryTable(sheet, 30, [
+  const personalTypeRows = personalDataTypeRows(summary);
+  const personalTypesStart = 29;
+  addSectionHeader(sheet, personalTypesStart, "Personal Data Type Counts");
+  addSummaryTable(sheet, personalTypesStart + 1, personalTypeRows);
+
+  const pdplStart = personalTypesStart + personalTypeRows.length + 3;
+  const pdplRows = [
     ["Indicator", "Status"],
     ["Data Subject Rights Coverage", pdpl?.dataSubjectRightsCoverage || "Needs Review"],
     ["Consent Tracking Status", pdpl?.consentTrackingStatus || "Needs Review"],
     ["Cross-Border Transfer Flags", pdpl?.crossBorderTransferFlags || "No Flags Recorded"],
     ["Governance Notes", pdpl?.governanceNotes || ""],
-  ]);
+  ];
+  addSectionHeader(sheet, pdplStart, "PDPL General Notes");
+  addSummaryTable(sheet, pdplStart + 1, pdplRows);
 
-  addSectionHeader(sheet, 37, "Reference Links");
-  const headerRowNumber = 38;
+  const linksStart = pdplStart + pdplRows.length + 3;
+  addSectionHeader(sheet, linksStart, "Reference Links");
+  const headerRowNumber = linksStart + 1;
   const headers = ["Title", "URL", "Category", "Description", "Created By", "Updated At"];
   sheet.getRow(headerRowNumber).values = [null, ...headers];
   sheet.getRow(headerRowNumber).height = 24;

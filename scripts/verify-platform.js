@@ -86,7 +86,8 @@ async function main() {
     throw new Error("CSV original columns were not preserved.");
   }
 
-  await consumeSse(`/api/systems/${csvSystem.system.id}/classify-stream?mode=all`);
+  const csvClassificationOrder = await consumeSse(`/api/systems/${csvSystem.system.id}/classify-stream?mode=all`);
+  assertAscendingRowOrder(csvClassificationOrder, "CSV");
 
   const excelSystem = await request("/api/systems", {
     method: "POST",
@@ -121,11 +122,15 @@ async function main() {
     throw new Error("Excel original columns were not preserved.");
   }
 
-  await consumeSse(`/api/systems/${excelSystem.system.id}/classify-stream?mode=all`);
+  const excelClassificationOrder = await consumeSse(`/api/systems/${excelSystem.system.id}/classify-stream?mode=all`);
+  assertAscendingRowOrder(excelClassificationOrder, "Excel");
   const classifiedExcelRecords = await request(`/api/systems/${excelSystem.system.id}/records?page=1&pageSize=10`);
   const classifiedRow = classifiedExcelRecords.records[0];
   if (!classifiedRow.confidentiality || classifiedRow.confidentiality === "Pending") {
     throw new Error("Confidentiality did not persist after classification.");
+  }
+  if (!Object.values(classifiedExcelRecords.summary.personalDataTypes || {}).some((count) => Number(count) > 0)) {
+    throw new Error("Personal data type counts were not included in the system summary.");
   }
   if (!/Bahrain PDPL/i.test(`${classifiedRow.confReason} ${classifiedRow.personalReason}`)) {
     throw new Error("Bahrain-law-grounded reasoning was not stored with classification results.");
@@ -185,6 +190,12 @@ async function main() {
   if (!systemDataHeaders.includes("Source") || !systemDataHeaders.includes("Retention")) {
     throw new Error("Export did not preserve uploaded Excel columns.");
   }
+  if (!worksheetContains(workbook.getWorksheet("Overall"), "Personal Data Type Counts")) {
+    throw new Error("Overall export sheet did not include personal data type counts.");
+  }
+  if (!worksheetContains(workbook.getWorksheet("Links & General Info"), "Personal Data Type Counts")) {
+    throw new Error("Links & General Info export sheet did not include personal data type counts.");
+  }
 
   const health = await request("/api/health");
   const dbExists = fs.existsSync(path.join(root, "database", "app.db"));
@@ -224,6 +235,21 @@ async function uploadFile(systemId, filePath, type) {
   });
 }
 
+function worksheetContains(sheet, expected) {
+  const needle = String(expected).toLowerCase();
+  return sheet.getSheetValues().some((row) =>
+    Array.isArray(row) && row.some((cell) => String(cell || "").toLowerCase().includes(needle))
+  );
+}
+
+function assertAscendingRowOrder(rowIndexes, label) {
+  for (let index = 1; index < rowIndexes.length; index += 1) {
+    if (rowIndexes[index] < rowIndexes[index - 1]) {
+      throw new Error(`${label} classification rows were not streamed in rowIndex order.`);
+    }
+  }
+}
+
 async function consumeSse(url) {
   const response = await fetch(`${BASE}${url}`, { headers: headers() });
   if (!response.ok) throw new Error(`SSE failed: ${response.status}`);
@@ -231,6 +257,7 @@ async function consumeSse(url) {
   const decoder = new TextDecoder();
   let buffer = "";
   let doneSeen = false;
+  const rowIndexes = [];
   while (!doneSeen) {
     const read = await reader.read();
     if (read.done) break;
@@ -238,10 +265,30 @@ async function consumeSse(url) {
     const events = buffer.split("\n\n");
     buffer = events.pop() || "";
     for (const event of events) {
-      if (event.includes("event: done")) doneSeen = true;
-      if (event.includes("event: error")) throw new Error(event);
+      const parsed = parseSseEvent(event);
+      if (parsed.eventName === "row" && parsed.data?.record?.rowIndex) {
+        rowIndexes.push(Number(parsed.data.record.rowIndex));
+      }
+      if (parsed.eventName === "done") doneSeen = true;
+      if (parsed.eventName === "classification-error") throw new Error(event);
     }
   }
+  return rowIndexes;
+}
+
+function parseSseEvent(raw) {
+  const lines = raw.split("\n");
+  const eventName = (lines.find((line) => line.startsWith("event:")) || "event: message")
+    .replace(/^event:\s*/, "")
+    .trim();
+  const data = lines
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.replace(/^data:\s*/, ""))
+    .join("\n");
+  return {
+    eventName,
+    data: data ? JSON.parse(data) : null,
+  };
 }
 
 main().catch((error) => {

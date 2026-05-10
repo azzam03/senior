@@ -340,6 +340,7 @@ function getSystemSummary(systemId) {
     "No Personal Data": rows.filter((row) => row.personalData !== "Yes").length,
     "Has Personal Data": personal,
   };
+  const personalDataTypes = countPersonalDataTypes(rows);
   const completedSystems = pending === 0 && total > 0 ? 1 : 0;
 
   return {
@@ -356,9 +357,22 @@ function getSystemSummary(systemId) {
     tablesWithPersonalData,
     confidentiality,
     personalDistribution,
+    personalDataTypes,
     classificationProgress: pct(classified, total),
     completedSystems,
   };
+}
+
+function countPersonalDataTypes(rows) {
+  const counts = {};
+  for (const row of rows) {
+    if (row.personalData !== "Yes") continue;
+    const label = normalize(row.personalDataType) || "Personal Data";
+    counts[label] = (counts[label] || 0) + 1;
+  }
+  return Object.fromEntries(
+    Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  );
 }
 
 function classificationNeedsReview(result) {
@@ -379,6 +393,38 @@ function updateSystemClassificationState(systemId) {
     systemId
   );
   return summary;
+}
+
+function saveClassificationResult(db, recordId, result) {
+  const needsReview = classificationNeedsReview(result);
+  const classifiedAt = nowIso();
+  db.prepare(
+    `UPDATE data_records SET
+       confidentiality = ?, confReason = ?, personalData = ?, personalReason = ?,
+       personalDataType = ?, pseudonymizable = ?, anonymizable = ?, specialCategory = ?,
+       confidenceScore = ?, policyRecommendation = ?, needsReview = ?,
+       reviewStatus = CASE WHEN reviewStatus = 'Approved' THEN reviewStatus ELSE 'Pending Review' END,
+       auditTrail = ?, updatedAt = ?, lastModifiedBy = ?
+     WHERE id = ?`
+  ).run(
+    result.confidentiality,
+    result.reason,
+    result.personalData,
+    result.personalReason,
+    result.personalDataType,
+    result.pseudonymizable,
+    result.anonymizable,
+    result.specialCategory,
+    result.confidenceScore,
+    result.policyRecommendation,
+    needsReview ? 1 : 0,
+    `Classified via ${result.source || "AI"} at ${classifiedAt}`,
+    classifiedAt,
+    "AI Classification Service",
+    recordId
+  );
+  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+  return db.prepare("SELECT * FROM data_records WHERE id = ?").get(recordId);
 }
 
 function countBy(rows, key, labels) {
@@ -1035,11 +1081,13 @@ app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, as
       page: req.query.page || 1,
       pageSize: mode === "all" ? 100000 : Math.min(50, Number(req.query.pageSize || 50)),
       search: mode === "all" ? "" : req.query.search,
-      sortBy: req.query.sortBy,
-      sortDir: req.query.sortDir,
+      sortBy: "rowIndex",
+      sortDir: "asc",
     };
     const recordSet = listRecords(req.system.id, pageOptions);
-    const records = mode === "all" ? recordSet.allRows : recordSet.rows.slice(0, 50);
+    const records = (mode === "all" ? recordSet.allRows : recordSet.rows.slice(0, 50))
+      .slice()
+      .sort((a, b) => a.rowIndex - b.rowIndex);
 
     send("start", {
       mode,
@@ -1054,66 +1102,36 @@ app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, as
       return;
     }
 
-    const batchSize = 15;
     let processed = 0;
-    for (let index = 0; index < records.length; index += batchSize) {
-      const batch = records.slice(index, index + batchSize);
+    let fallbackWarningSent = false;
+    for (const record of records) {
       let results;
       try {
-        results = await classifyRecords(batch, contextPoints);
+        results = await classifyRecords([record], contextPoints);
       } catch (error) {
         results = new Map();
-        for (const record of batch) {
-          results.set(record.id, classifyRecordLocally(record, contextPoints));
+        results.set(record.id, classifyRecordLocally(record, contextPoints));
+        if (!fallbackWarningSent) {
+          fallbackWarningSent = true;
+          send("warning", {
+            message: "AI classification failed for one row, so local rules were used and classification continued.",
+            detail: error.message || "Classification fallback used",
+          });
         }
-        send("warning", {
-          message: `Batch ${Math.floor(index / batchSize) + 1} used local rules after AI classification failed.`,
-          detail: error.message || "Classification fallback used",
-        });
       }
 
-      for (const record of batch) {
-        const result = results.get(record.id) || classifyRecordLocally(record, contextPoints);
-        const needsReview = classificationNeedsReview(result);
-        db.prepare(
-          `UPDATE data_records SET
-             confidentiality = ?, confReason = ?, personalData = ?, personalReason = ?,
-             personalDataType = ?, pseudonymizable = ?, anonymizable = ?, specialCategory = ?,
-             confidenceScore = ?, policyRecommendation = ?, needsReview = ?,
-             reviewStatus = CASE WHEN reviewStatus = 'Approved' THEN reviewStatus ELSE 'Pending Review' END,
-             auditTrail = ?, updatedAt = ?, lastModifiedBy = ?
-           WHERE id = ?`
-        ).run(
-          result.confidentiality,
-          result.reason,
-          result.personalData,
-          result.personalReason,
-          result.personalDataType,
-          result.pseudonymizable,
-          result.anonymizable,
-          result.specialCategory,
-          result.confidenceScore,
-          result.policyRecommendation,
-          needsReview ? 1 : 0,
-          `Classified via ${result.source || "AI"} at ${nowIso()}`,
-          nowIso(),
-          "AI Classification Service",
-          record.id
-        );
-
-        processed += 1;
-        const updated = db.prepare("SELECT * FROM data_records WHERE id = ?").get(record.id);
-        send("row", {
-          processed,
-          total: records.length,
-          percentage: pct(processed, records.length),
-          record: recordToApi(updated),
-        });
-      }
-
+      const result = results.get(record.id) || classifyRecordLocally(record, contextPoints);
+      const updated = saveClassificationResult(db, record.id, result);
+      processed += 1;
       const summary = updateSystemClassificationState(req.system.id);
-      db.exec("PRAGMA wal_checkpoint(PASSIVE)");
 
+      send("row", {
+        processed,
+        total: records.length,
+        percentage: pct(processed, records.length),
+        record: recordToApi(updated),
+        summary,
+      });
       send("progress", {
         processed,
         total: records.length,
@@ -1126,7 +1144,7 @@ app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, as
     db.exec("PRAGMA wal_checkpoint(PASSIVE)");
     send("done", { total: records.length, summary });
   } catch (error) {
-    send("error", { error: error.message || "Classification failed" });
+    send("classification-error", { error: error.message || "Classification failed" });
   } finally {
     clearInterval(heartbeat);
     if (!res.writableEnded && !res.destroyed) {

@@ -3,6 +3,7 @@ const { getDb } = require("./db");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_TIMEOUT_MS = Math.max(5000, Number(process.env.OPENAI_TIMEOUT_MS || 25000));
 const CLASSIFICATION_POLICY_VERSION = "bahrain-pdpl-v3";
 const BAHRAIN_PDPL_REFERENCE_URL = "https://www.pdp.gov.bh/en/assets/pdf/regulations.pdf";
 
@@ -53,26 +54,39 @@ async function classifyRecords(records, contextPoints) {
 
 async function classifyWithOpenAI(records, contextPoints) {
   const prompt = buildPrompt(records, contextPoints);
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            `You are an enterprise data classification engine for confidentiality, personal data, and Bahrain PDPL-oriented governance. Use only TableName, ColumnName, and supplied system context. ${BAHRAIN_PDPL_CONTEXT} Return strict JSON only.`,
-        },
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              `You are an enterprise data classification engine for confidentiality, personal data, and Bahrain PDPL-oriented governance. Use only TableName, ColumnName, and supplied system context. ${BAHRAIN_PDPL_CONTEXT} Return strict JSON only.`,
+          },
+          { role: "user", content: prompt },
+        ],
+      }),
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`OpenAI classification timed out after ${OPENAI_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     throw new Error(`OpenAI classification failed with status ${response.status}`);
@@ -219,6 +233,7 @@ function localClassification(tableName, columnName, contextPoints = []) {
     else if (personName) personalDataType = "Name";
     else if (health) personalDataType = "Health Data";
     else if (demographics) personalDataType = "Demographic Attribute";
+    else if (subjectIdentifier || username) personalDataType = "Identifier";
     else personalDataType = "Individual Reference";
   }
 
