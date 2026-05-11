@@ -381,6 +381,7 @@ function renderSystems() {
     qs(".records-count", card).textContent = `${system.summary.totalRecords || 0} records`;
     qs(".file-chip", card).textContent = system.lastUploadFileName || "No file uploaded";
     qs(".open-system", card).addEventListener("click", () => openSystem(system.id));
+    qs(".delete-system", card).addEventListener("click", () => deleteSystem(system));
     grid.append(card);
   }
 }
@@ -389,6 +390,23 @@ function textLine(text) {
   const span = document.createElement("span");
   span.textContent = text;
   return span;
+}
+
+async function deleteSystem(system) {
+  const confirmed = window.confirm(
+    `Delete "${system.name}" and all related uploaded rows, classifications, PDPL notes, context, links, and jobs?`
+  );
+  if (!confirmed) return;
+
+  try {
+    await api(`/api/systems/${system.id}`, { method: "DELETE" });
+    if (state.currentSystem?.id === system.id) state.currentSystem = null;
+    state.systems = state.systems.filter((item) => item.id !== system.id);
+    toast(`Deleted ${system.name}.`);
+    await loadDashboard();
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 async function openSystem(systemId) {
@@ -505,27 +523,85 @@ function renderPersonalTypeSummary(values) {
     .map(([label, count]) => [label, Number(count || 0)])
     .filter(([, count]) => count > 0)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const total = entries.reduce((sum, [, count]) => sum + count, 0);
 
   if (!entries.length) {
-    const row = document.createElement("div");
-    const label = document.createElement("span");
-    const count = document.createElement("strong");
-    label.textContent = "No personal data identified";
-    count.textContent = "0";
-    row.append(label, count);
-    container.append(row);
+    const empty = document.createElement("div");
+    empty.className = "personal-type-empty";
+    empty.textContent = "No personal-data categories have been identified yet.";
+    container.append(empty);
     return;
   }
 
+  const overview = document.createElement("div");
+  overview.className = "personal-type-overview";
+  overview.append(
+    personalTypeMetric("Categories", entries.length),
+    personalTypeMetric("Personal Fields", total),
+    personalTypeMetric("PDPL Review", `${entries.length} tracks`)
+  );
+  container.append(overview);
+
   for (const [labelText, countValue] of entries) {
-    const row = document.createElement("div");
-    const label = document.createElement("span");
-    const count = document.createElement("strong");
+    const percentage = clampPercent((countValue / Math.max(1, total)) * 100);
+    const row = document.createElement("article");
+    row.className = "personal-type-row";
+
+    const header = document.createElement("div");
+    header.className = "personal-type-row-header";
+    const label = document.createElement("strong");
     label.textContent = labelText;
-    count.textContent = countValue;
-    row.append(label, count);
+    const count = document.createElement("span");
+    count.textContent = `${countValue} fields`;
+    header.append(label, count);
+
+    const bar = document.createElement("div");
+    bar.className = "personal-type-bar";
+    const fill = document.createElement("i");
+    fill.style.width = `${percentage}%`;
+    bar.append(fill);
+
+    const detail = document.createElement("div");
+    detail.className = "personal-type-detail";
+    const share = document.createElement("span");
+    share.textContent = `${percentage}% of personal-data fields`;
+    const guidance = document.createElement("em");
+    guidance.textContent = pdplGuidanceForType(labelText);
+    detail.append(share, guidance);
+
+    row.append(header, bar, detail);
     container.append(row);
   }
+}
+
+function personalTypeMetric(label, value) {
+  const item = document.createElement("div");
+  const span = document.createElement("span");
+  const strong = document.createElement("strong");
+  span.textContent = label;
+  strong.textContent = value;
+  item.append(span, strong);
+  return item;
+}
+
+function pdplGuidanceForType(type) {
+  const text = String(type || "").toLowerCase();
+  if (/health|medical|biometric|genetic|religion|disability/.test(text)) {
+    return "Enhanced safeguards, explicit lawful basis, strict access.";
+  }
+  if (/government|national|identifier|id|passport|license/.test(text)) {
+    return "Masking, restricted access, purpose limitation.";
+  }
+  if (/financial|salary|bank|payment|card|income/.test(text)) {
+    return "Restricted processing, retention controls, audit trail.";
+  }
+  if (/contact|email|phone|address/.test(text)) {
+    return "Notice, lawful basis, retention and access review.";
+  }
+  if (/name|individual|reference|demographic/.test(text)) {
+    return "Lawful basis, minimization, subject-rights readiness.";
+  }
+  return "Confirm lawful basis, retention, access control, and PDPL rights.";
 }
 
 function renderChart(container, values, preferredOrder = []) {

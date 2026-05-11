@@ -254,11 +254,14 @@
                 </div>
                 <div id="personalChart" class="chart-list"></div>
               </article>
-              <article class="section-card">
+              <article class="section-card personal-type-card">
                 <div class="section-header compact">
-                  <h2>Personal Data Types</h2>
+                  <div>
+                    <h2>Personal Data Types</h2>
+                    <p>PDPL-oriented breakdown by data category, handling focus, and volume.</p>
+                  </div>
                 </div>
-                <div id="personalTypeSummary" class="summary-list"></div>
+                <div id="personalTypeSummary" class="personal-type-list"></div>
               </article>
               <article class="section-card">
                 <div class="section-header compact">
@@ -588,7 +591,9 @@
             <span class="status-pill">In Progress</span>
             <h3></h3>
           </div>
-          <button class="btn btn-ghost open-system" type="button">Open</button>
+          <button class="delete-system icon-button danger" type="button" aria-label="Delete system">
+            <span class="trash-icon" aria-hidden="true"></span>
+          </button>
         </div>
         <div class="system-card-meta"></div>
         <progress value="0" max="100"></progress>
@@ -596,6 +601,7 @@
           <span class="records-count">0 records</span>
           <span class="file-chip">No file uploaded</span>
         </div>
+        <button class="btn btn-secondary open-system system-card-open" type="button">Open</button>
       </article>
     </template>
 

@@ -501,6 +501,12 @@ function classificationJobTargets(systemId, job) {
   return records.slice().sort((a, b) => a.rowIndex - b.rowIndex);
 }
 
+function classificationJobCanContinue(db, jobId, systemId) {
+  const job = db.prepare("SELECT id FROM classification_jobs WHERE id = ?").get(jobId);
+  const system = db.prepare("SELECT id FROM systems WHERE id = ?").get(systemId);
+  return Boolean(job && system);
+}
+
 function findActiveClassificationJob(systemId) {
   const db = getDb();
   const job = db
@@ -606,6 +612,7 @@ async function runClassificationJob(jobId) {
   let apiCreditWarningSent = Boolean(safeJson(job.warningJson, null)?.code === "OPENAI_NO_CREDITS");
 
   for (let index = 0; index < records.length;) {
+    if (!classificationJobCanContinue(db, jobId, job.systemId)) return;
     const firstRecord = records[index];
     const currentPage = classificationJobPage(job, firstRecord);
     const pageRecords = [];
@@ -657,9 +664,12 @@ async function runClassificationJob(jobId) {
       }
     }
 
+    if (!classificationJobCanContinue(db, jobId, job.systemId)) return;
     for (const record of pageRecords) {
+      if (!classificationJobCanContinue(db, jobId, job.systemId)) return;
       const result = results.get(record.id) || classifyRecordLocally(record, contextPoints);
       const updated = saveClassificationResult(db, record.id, result);
+      if (!updated) return;
       processed += 1;
       db.prepare(
         `UPDATE classification_jobs
@@ -942,6 +952,26 @@ app.put("/api/systems/:id", requireAuth, requireSystemAccess, (req, res) => {
   );
   const system = db.prepare("SELECT * FROM systems WHERE id = ?").get(req.system.id);
   res.json({ system: { ...system, summary: getSystemSummary(system.id) } });
+});
+
+app.delete("/api/systems/:id", requireAuth, requireSystemAccess, async (req, res) => {
+  await createDatabaseBackup("before-system-delete");
+  const db = getDb();
+  const deletedAt = nowIso();
+  db.prepare(
+    `UPDATE classification_jobs
+        SET status = 'Failed',
+            errorMessage = ?,
+            failedAt = ?,
+            updatedAt = ?
+      WHERE systemId = ? AND status IN ('Queued', 'Running')`
+  ).run("System was deleted before classification completed.", deletedAt, deletedAt, req.system.id);
+  db.prepare("DELETE FROM systems WHERE id = ?").run(req.system.id);
+  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+  res.json({
+    message: "System and all related records were deleted.",
+    dashboard: getDashboardSummary(req.user.id),
+  });
 });
 
 app.post("/api/systems/:id/upload", requireAuth, requireSystemAccess, upload.single("metadataFile"), async (req, res) => {

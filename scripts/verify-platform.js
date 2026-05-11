@@ -196,6 +196,18 @@ async function main() {
   if (!worksheetContains(workbook.getWorksheet("Links & General Info"), "Personal Data Type Counts")) {
     throw new Error("Links & General Info export sheet did not include personal data type counts.");
   }
+  await request(`/api/systems/${csvSystem.system.id}`, {
+    method: "DELETE",
+  });
+  let deleteVerified = false;
+  try {
+    await request(`/api/systems/${csvSystem.system.id}`);
+  } catch (error) {
+    deleteVerified = /not found/i.test(error.message);
+  }
+  if (!deleteVerified) {
+    throw new Error("Deleted system was still accessible after deletion.");
+  }
 
   const health = await request("/api/health");
   const dbExists = fs.existsSync(path.join(root, "database", "app.db"));
@@ -207,6 +219,7 @@ async function main() {
     email,
     csvSystemId: csvSystem.system.id,
     excelSystemId: excelSystem.system.id,
+    deleteVerified,
     sheets: sheetNames,
     databasePath: health.databasePath,
     dbExists,
