@@ -210,6 +210,29 @@ function createTables(db) {
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS classification_jobs (
+      id TEXT PRIMARY KEY,
+      systemId INTEGER NOT NULL,
+      mode TEXT NOT NULL,
+      status TEXT NOT NULL,
+      total INTEGER NOT NULL DEFAULT 0,
+      processed INTEGER NOT NULL DEFAULT 0,
+      pageSize INTEGER NOT NULL DEFAULT 25,
+      currentPage INTEGER NOT NULL DEFAULT 1,
+      currentRecordId INTEGER,
+      currentRowIndex INTEGER,
+      optionsJson TEXT,
+      warningJson TEXT,
+      errorMessage TEXT,
+      createdBy TEXT,
+      startedAt TEXT,
+      completedAt TEXT,
+      failedAt TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      FOREIGN KEY (systemId) REFERENCES systems(id) ON DELETE CASCADE
+    );
   `);
 }
 

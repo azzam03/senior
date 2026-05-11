@@ -21,6 +21,8 @@ const state = {
   sortDir: "asc",
   viewMode: "classification",
   classifierStream: null,
+  classifierJobId: null,
+  classifierMode: null,
   liveUpdatedRecordId: null,
 };
 
@@ -851,47 +853,53 @@ function sortLabel(label, key) {
 /* SSE classification gives demos a real-time feel. The server streams row updates,
  * progress, and summary changes as each batch completes.
  */
-function startClassification(mode) {
+async function startClassification(mode) {
   if (!state.currentSystem) return;
   closeClassifierStream();
-  const params = new URLSearchParams({
+  const body = {
     mode,
     page: state.page,
     pageSize: Math.min(50, state.pageSize),
     search: mode === "all" ? "" : state.search,
     sortBy: state.sortBy,
     sortDir: state.sortDir,
-  });
+  };
   const fileName = state.currentSystem.lastUploadFileName || "No file uploaded";
   qs(".classification-panel").classList.add("is-running");
   setClassificationStatus(mode === "all" ? `Classifying all rows in ${fileName}` : `Classifying current page in ${fileName}`, 0);
-  state.classifierStream = new EventSource(`/api/systems/${state.currentSystem.id}/classify-stream?${params.toString()}`);
+  let jobResult;
+  try {
+    jobResult = await api(`/api/systems/${state.currentSystem.id}/classification-jobs`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    toast(error.message);
+    setClassificationStatus("Classification could not start", 0);
+    qs(".classification-panel").classList.remove("is-running");
+    return;
+  }
+
+  state.classifierJobId = jobResult.job.id;
+  state.classifierMode = jobResult.job.mode;
+  state.classifierStream = new EventSource(
+    `/api/systems/${state.currentSystem.id}/classification-jobs/${jobResult.job.id}/stream`
+  );
 
   state.classifierStream.addEventListener("start", (event) => {
     const data = JSON.parse(event.data);
-    updateFileNameLabels(data.fileName || fileName);
-    setClassificationStatus(`Started ${data.total} records`, 0);
+    updateFileNameLabels(fileName);
+    handleClassificationJobUpdate(data, { renderTable: false });
   });
 
-  state.classifierStream.addEventListener("row", (event) => {
+  state.classifierStream.addEventListener("row", async (event) => {
     const data = JSON.parse(event.data);
-    state.records = state.records.map((record) => (record.id === data.record.id ? data.record : record));
-    state.liveUpdatedRecordId = data.record.id;
-    setClassificationStatus(`Processed ${data.processed} of ${data.total}`, data.percentage);
-    if (data.summary) renderOverview(data.summary);
-    renderRecordsTable();
-    setTimeout(() => {
-      if (state.liveUpdatedRecordId === data.record.id) {
-        state.liveUpdatedRecordId = null;
-        renderRecordsTable();
-      }
-    }, 1200);
+    await handleClassificationJobUpdate(data);
   });
 
-  state.classifierStream.addEventListener("progress", (event) => {
+  state.classifierStream.addEventListener("progress", async (event) => {
     const data = JSON.parse(event.data);
-    setClassificationStatus(`Processed ${data.processed} of ${data.total}`, data.percentage);
-    renderOverview(data.summary);
+    await handleClassificationJobUpdate(data);
   });
 
   state.classifierStream.addEventListener("warning", (event) => {
@@ -912,7 +920,8 @@ function startClassification(mode) {
 
   state.classifierStream.addEventListener("done", async (event) => {
     const data = JSON.parse(event.data);
-    setClassificationStatus(`Complete: ${data.total} records`, 100);
+    const job = data.job || {};
+    setClassificationStatus(`Complete: ${job.total || 0} records`, 100);
     renderOverview(data.summary);
     closeClassifierStream();
     qs(".classification-panel").classList.remove("is-running");
@@ -921,7 +930,8 @@ function startClassification(mode) {
   });
 
   state.classifierStream.addEventListener("classification-error", async (event) => {
-    const message = event.data ? JSON.parse(event.data).error : "Classification failed";
+    const data = event.data ? JSON.parse(event.data) : null;
+    const message = data?.job?.errorMessage || data?.error || "Classification failed";
     toast(message);
     setClassificationStatus("Classification stopped", 0);
     qs(".classification-panel").classList.remove("is-running");
@@ -940,11 +950,45 @@ function startClassification(mode) {
   });
 }
 
+async function handleClassificationJobUpdate(data, options = {}) {
+  const job = data.job || {};
+  const record = data.record || null;
+  const total = Number(job.total || 0);
+  const processed = Number(job.processed || 0);
+  const percentage = Number(job.percentage || clampPercent((processed / Math.max(1, total)) * 100));
+  const currentPage = Number(job.currentPage || state.page || 1);
+  const pageLabel = state.classifierMode === "all" ? ` - page ${currentPage}` : "";
+  setClassificationStatus(`Processed ${processed} of ${total}${pageLabel}`, percentage);
+  if (data.summary) renderOverview(data.summary);
+
+  if (state.classifierMode === "all" && currentPage && currentPage !== state.page) {
+    state.page = currentPage;
+    await loadRecords();
+  }
+
+  if (record) {
+    state.records = state.records.map((item) => (item.id === record.id ? record : item));
+    state.liveUpdatedRecordId = record.id;
+  }
+
+  if (options.renderTable !== false) renderRecordsTable();
+  if (record) {
+    setTimeout(() => {
+      if (state.liveUpdatedRecordId === record.id) {
+        state.liveUpdatedRecordId = null;
+        renderRecordsTable();
+      }
+    }, 1200);
+  }
+}
+
 function closeClassifierStream() {
   if (state.classifierStream) {
     state.classifierStream.close();
     state.classifierStream = null;
   }
+  state.classifierJobId = null;
+  state.classifierMode = null;
   const panel = qs(".classification-panel");
   if (panel) panel.classList.remove("is-running");
 }

@@ -5,6 +5,7 @@ const multer = require("multer");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const dotenv = require("dotenv");
+const { EventEmitter } = require("events");
 
 dotenv.config({ path: path.join(__dirname, ".env.local") });
 
@@ -32,6 +33,9 @@ const SESSION_COOKIE_OPTIONS = {
   sameSite: "lax",
   path: "/",
 };
+const activeClassificationJobs = new Map();
+const classificationJobEvents = new EventEmitter();
+classificationJobEvents.setMaxListeners(200);
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -423,8 +427,287 @@ function saveClassificationResult(db, recordId, result) {
     "AI Classification Service",
     recordId
   );
-  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
   return db.prepare("SELECT * FROM data_records WHERE id = ?").get(recordId);
+}
+
+function classificationJobToApi(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    systemId: row.systemId,
+    mode: row.mode,
+    status: row.status,
+    total: Number(row.total || 0),
+    processed: Number(row.processed || 0),
+    pageSize: Number(row.pageSize || 25),
+    currentPage: Number(row.currentPage || 1),
+    currentRecordId: row.currentRecordId || null,
+    currentRowIndex: row.currentRowIndex || null,
+    options: safeJson(row.optionsJson, {}),
+    warning: safeJson(row.warningJson, null),
+    errorMessage: row.errorMessage || "",
+    createdBy: row.createdBy || "",
+    startedAt: row.startedAt || "",
+    completedAt: row.completedAt || "",
+    failedAt: row.failedAt || "",
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    percentage: pct(Number(row.processed || 0), Number(row.total || 0)),
+  };
+}
+
+function getClassificationJob(db, jobId) {
+  return db.prepare("SELECT * FROM classification_jobs WHERE id = ?").get(jobId);
+}
+
+function getClassificationJobPayload(jobId, record = null, summary = undefined) {
+  const db = getDb();
+  const job = getClassificationJob(db, jobId);
+  if (!job) return null;
+  let currentRecord = record;
+  if (!currentRecord && job.currentRecordId) {
+    const row = db.prepare("SELECT * FROM data_records WHERE id = ?").get(job.currentRecordId);
+    currentRecord = row ? recordToApi(row) : null;
+  }
+  return {
+    job: classificationJobToApi(job),
+    record: currentRecord,
+    summary: summary === undefined ? getSystemSummary(job.systemId) : summary,
+  };
+}
+
+function emitClassificationJobEvent(jobId, event, payload) {
+  classificationJobEvents.emit(`classification-job:${jobId}`, event, payload);
+}
+
+function classificationJobPage(job, record) {
+  if (job.mode !== "all") {
+    return Math.max(1, Number(safeJson(job.optionsJson, {}).page || 1));
+  }
+  return Math.max(1, Math.ceil(Number(record.rowIndex || 1) / Math.max(1, Number(job.pageSize || 25))));
+}
+
+function classificationJobTargets(systemId, job) {
+  const options = safeJson(job.optionsJson, {});
+  const mode = job.mode === "all" ? "all" : "page";
+  const recordSet = listRecords(systemId, {
+    page: options.page || 1,
+    pageSize: job.pageSize || options.pageSize || 25,
+    search: mode === "all" ? "" : options.search,
+    sortBy: mode === "all" ? "rowIndex" : options.sortBy || "rowIndex",
+    sortDir: mode === "all" ? "asc" : options.sortDir || "asc",
+  });
+  const records = mode === "all" ? recordSet.allRows : recordSet.rows;
+  return records.slice().sort((a, b) => a.rowIndex - b.rowIndex);
+}
+
+function findActiveClassificationJob(systemId) {
+  const db = getDb();
+  const job = db
+    .prepare(
+      `SELECT * FROM classification_jobs
+        WHERE systemId = ? AND status IN ('Queued', 'Running')
+        ORDER BY createdAt DESC
+        LIMIT 1`
+    )
+    .get(systemId);
+
+  if (!job) return null;
+  if (activeClassificationJobs.has(job.id)) return job;
+
+  db.prepare(
+    `UPDATE classification_jobs
+        SET status = 'Failed',
+            errorMessage = ?,
+            failedAt = ?,
+            updatedAt = ?
+      WHERE id = ?`
+  ).run("Classification job stopped before completion.", nowIso(), nowIso(), job.id);
+  return null;
+}
+
+function createClassificationJob({ systemId, mode, page, pageSize, search, sortBy, sortDir, createdBy }) {
+  const db = getDb();
+  const safeMode = mode === "all" ? "all" : "page";
+  const safePageSize = Math.min(100, Math.max(1, Number(pageSize || 25)));
+  const options = {
+    page: Math.max(1, Number(page || 1)),
+    pageSize: safePageSize,
+    search: safeMode === "all" ? "" : normalize(search),
+    sortBy: safeMode === "all" ? "rowIndex" : normalize(sortBy) || "rowIndex",
+    sortDir: safeMode === "all" ? "asc" : normalize(sortDir).toLowerCase() === "desc" ? "desc" : "asc",
+  };
+  const id = crypto.randomUUID();
+  const now = nowIso();
+  const draftJob = {
+    mode: safeMode,
+    pageSize: safePageSize,
+    optionsJson: JSON.stringify(options),
+  };
+  const total = classificationJobTargets(systemId, draftJob).length;
+  db.prepare(
+    `INSERT INTO classification_jobs (
+       id, systemId, mode, status, total, processed, pageSize, currentPage,
+       optionsJson, createdBy, createdAt, updatedAt
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id,
+    systemId,
+    safeMode,
+    "Queued",
+    total,
+    0,
+    safePageSize,
+    options.page,
+    JSON.stringify(options),
+    createdBy,
+    now,
+    now
+  );
+  return getClassificationJob(db, id);
+}
+
+function startClassificationJob(jobId) {
+  if (activeClassificationJobs.has(jobId)) return activeClassificationJobs.get(jobId);
+  const promise = runClassificationJob(jobId)
+    .catch((error) => failClassificationJob(jobId, error))
+    .finally(() => {
+      activeClassificationJobs.delete(jobId);
+    });
+  activeClassificationJobs.set(jobId, promise);
+  return promise;
+}
+
+async function runClassificationJob(jobId) {
+  const db = getDb();
+  let job = getClassificationJob(db, jobId);
+  if (!job) return;
+
+  const system = db.prepare("SELECT * FROM systems WHERE id = ?").get(job.systemId);
+  if (!system) throw new Error("System not found for classification job.");
+
+  const contextPoints = db.prepare("SELECT tag, content FROM context_points WHERE systemId = ?").all(job.systemId);
+  const records = classificationJobTargets(job.systemId, job);
+  const startedAt = nowIso();
+  db.prepare(
+    `UPDATE classification_jobs
+        SET status = 'Running',
+            total = ?,
+            startedAt = COALESCE(startedAt, ?),
+            updatedAt = ?
+      WHERE id = ?`
+  ).run(records.length, startedAt, startedAt, jobId);
+
+  job = getClassificationJob(db, jobId);
+  emitClassificationJobEvent(jobId, "start", getClassificationJobPayload(jobId));
+
+  let processed = Number(job.processed || 0);
+  let fallbackWarningSent = false;
+  let apiCreditWarningSent = Boolean(safeJson(job.warningJson, null)?.code === "OPENAI_NO_CREDITS");
+
+  for (let index = 0; index < records.length;) {
+    const firstRecord = records[index];
+    const currentPage = classificationJobPage(job, firstRecord);
+    const pageRecords = [];
+    while (index < records.length && classificationJobPage(job, records[index]) === currentPage) {
+      pageRecords.push(records[index]);
+      index += 1;
+    }
+
+    db.prepare(
+      `UPDATE classification_jobs
+          SET currentRecordId = ?,
+              currentRowIndex = ?,
+              currentPage = ?,
+              updatedAt = ?
+        WHERE id = ?`
+    ).run(firstRecord.id, firstRecord.rowIndex, currentPage, nowIso(), jobId);
+    emitClassificationJobEvent(jobId, "progress", getClassificationJobPayload(jobId));
+
+    let results;
+    try {
+      results = await classifyRecords(pageRecords, contextPoints);
+      if (results.apiWarning?.code === "OPENAI_NO_CREDITS" && !apiCreditWarningSent) {
+        apiCreditWarningSent = true;
+        db.prepare("UPDATE classification_jobs SET warningJson = ?, updatedAt = ? WHERE id = ?").run(
+          JSON.stringify(results.apiWarning),
+          nowIso(),
+          jobId
+        );
+        emitClassificationJobEvent(jobId, "warning", results.apiWarning);
+      }
+    } catch (error) {
+      results = new Map();
+      for (const record of pageRecords) {
+        results.set(record.id, classifyRecordLocally(record, contextPoints));
+      }
+      if (!fallbackWarningSent) {
+        fallbackWarningSent = true;
+        const warning = {
+          severity: "warning",
+          message: "AI classification failed for one row, so local rules were used and classification continued.",
+          detail: error.message || "Classification fallback used",
+        };
+        db.prepare("UPDATE classification_jobs SET warningJson = ?, updatedAt = ? WHERE id = ?").run(
+          JSON.stringify(warning),
+          nowIso(),
+          jobId
+        );
+        emitClassificationJobEvent(jobId, "warning", warning);
+      }
+    }
+
+    for (const record of pageRecords) {
+      const result = results.get(record.id) || classifyRecordLocally(record, contextPoints);
+      const updated = saveClassificationResult(db, record.id, result);
+      processed += 1;
+      db.prepare(
+        `UPDATE classification_jobs
+            SET processed = ?,
+                currentRecordId = ?,
+                currentRowIndex = ?,
+                currentPage = ?,
+                updatedAt = ?
+          WHERE id = ?`
+      ).run(processed, record.id, record.rowIndex, currentPage, nowIso(), jobId);
+
+      emitClassificationJobEvent(
+        jobId,
+        "row",
+        getClassificationJobPayload(jobId, recordToApi(updated), null)
+      );
+    }
+
+    const summary = updateSystemClassificationState(job.systemId);
+    db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    emitClassificationJobEvent(jobId, "progress", getClassificationJobPayload(jobId, null, summary));
+  }
+
+  const summary = updateSystemClassificationState(job.systemId);
+  db.prepare(
+    `UPDATE classification_jobs
+        SET status = 'Completed',
+            processed = total,
+            completedAt = ?,
+            updatedAt = ?
+      WHERE id = ?`
+  ).run(nowIso(), nowIso(), jobId);
+  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+  emitClassificationJobEvent(jobId, "done", getClassificationJobPayload(jobId, null, summary));
+}
+
+function failClassificationJob(jobId, error) {
+  const db = getDb();
+  const failedAt = nowIso();
+  db.prepare(
+    `UPDATE classification_jobs
+        SET status = 'Failed',
+            errorMessage = ?,
+            failedAt = ?,
+            updatedAt = ?
+      WHERE id = ?`
+  ).run(error.message || "Classification job failed", failedAt, failedAt, jobId);
+  emitClassificationJobEvent(jobId, "classification-error", getClassificationJobPayload(jobId));
 }
 
 function countBy(rows, key, labels) {
@@ -1043,6 +1326,102 @@ app.delete("/api/links/:linkId", requireAuth, (req, res) => {
   }
   db.prepare("DELETE FROM system_links WHERE id = ?").run(req.params.linkId);
   res.json({ message: "Link removed." });
+});
+
+app.post("/api/systems/:id/classification-jobs", requireAuth, requireSystemAccess, (req, res) => {
+  const activeJob = findActiveClassificationJob(req.system.id);
+  if (activeJob) {
+    res.status(202).json({ job: classificationJobToApi(activeJob), reused: true });
+    return;
+  }
+
+  const job = createClassificationJob({
+    systemId: req.system.id,
+    mode: req.body.mode,
+    page: req.body.page,
+    pageSize: req.body.pageSize,
+    search: req.body.search,
+    sortBy: req.body.sortBy,
+    sortDir: req.body.sortDir,
+    createdBy: req.user.email,
+  });
+  setImmediate(() => startClassificationJob(job.id));
+  res.status(202).json({ job: classificationJobToApi(job), reused: false });
+});
+
+app.get("/api/systems/:id/classification-jobs/:jobId", requireAuth, requireSystemAccess, (req, res) => {
+  const db = getDb();
+  const job = getClassificationJob(db, req.params.jobId);
+  if (!job || job.systemId !== req.system.id) {
+    res.status(404).json({ error: "Classification job not found." });
+    return;
+  }
+  res.json(getClassificationJobPayload(job.id));
+});
+
+app.get("/api/systems/:id/classification-jobs/:jobId/stream", requireAuth, requireSystemAccess, (req, res) => {
+  const db = getDb();
+  const job = getClassificationJob(db, req.params.jobId);
+  if (!job || job.systemId !== req.system.id) {
+    res.status(404).json({ error: "Classification job not found." });
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  let clientConnected = true;
+  const send = (event, payload) => {
+    if (!clientConnected || res.writableEnded || res.destroyed) return false;
+    try {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      return true;
+    } catch (_error) {
+      clientConnected = false;
+      return false;
+    }
+  };
+
+  const eventKey = `classification-job:${job.id}`;
+  const listener = (event, payload) => {
+    send(event, payload);
+    if (event === "done" || event === "classification-error") {
+      setImmediate(cleanup);
+    }
+  };
+  const cleanup = () => {
+    clientConnected = false;
+    clearInterval(heartbeat);
+    classificationJobEvents.off(eventKey, listener);
+    if (!res.writableEnded && !res.destroyed) res.end();
+  };
+
+  req.on("close", cleanup);
+  classificationJobEvents.on(eventKey, listener);
+  const heartbeat = setInterval(() => {
+    const payload = getClassificationJobPayload(job.id);
+    if (!payload) {
+      cleanup();
+      return;
+    }
+    send("heartbeat", { at: nowIso(), job: payload.job });
+  }, 15000);
+
+  const payload = getClassificationJobPayload(job.id);
+  send("start", payload);
+  if (payload?.job?.warning) send("warning", payload.job.warning);
+  if (payload?.job?.status === "Completed") {
+    send("done", payload);
+    setImmediate(cleanup);
+  } else if (payload?.job?.status === "Failed") {
+    send("classification-error", payload);
+    setImmediate(cleanup);
+  }
 });
 
 app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, async (req, res) => {

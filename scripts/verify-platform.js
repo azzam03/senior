@@ -86,7 +86,7 @@ async function main() {
     throw new Error("CSV original columns were not preserved.");
   }
 
-  const csvClassificationOrder = await consumeSse(`/api/systems/${csvSystem.system.id}/classify-stream?mode=all`);
+  const csvClassificationOrder = await runClassificationJob(csvSystem.system.id, "all");
   assertAscendingRowOrder(csvClassificationOrder, "CSV");
 
   const excelSystem = await request("/api/systems", {
@@ -122,7 +122,7 @@ async function main() {
     throw new Error("Excel original columns were not preserved.");
   }
 
-  const excelClassificationOrder = await consumeSse(`/api/systems/${excelSystem.system.id}/classify-stream?mode=all`);
+  const excelClassificationOrder = await runClassificationJob(excelSystem.system.id, "all");
   assertAscendingRowOrder(excelClassificationOrder, "Excel");
   const classifiedExcelRecords = await request(`/api/systems/${excelSystem.system.id}/records?page=1&pageSize=10`);
   const classifiedRow = classifiedExcelRecords.records[0];
@@ -248,6 +248,21 @@ function assertAscendingRowOrder(rowIndexes, label) {
       throw new Error(`${label} classification rows were not streamed in rowIndex order.`);
     }
   }
+}
+
+async function runClassificationJob(systemId, mode) {
+  const result = await request(`/api/systems/${systemId}/classification-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode,
+      page: 1,
+      pageSize: 25,
+      sortBy: "rowIndex",
+      sortDir: "asc",
+    }),
+  });
+  return consumeSse(`/api/systems/${systemId}/classification-jobs/${result.job.id}/stream`);
 }
 
 async function consumeSse(url) {
