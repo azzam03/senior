@@ -394,39 +394,50 @@ function textLine(text) {
 
 async function deleteSystem(system) {
   const confirmed = window.confirm(
-    `Delete "${system.name}" and all related uploaded rows, classifications, PDPL notes, context, links, and jobs?`
+    `Delete "${system.name}" and all related uploaded rows, classifications, PDPL notes, context, links, and jobs?\n\nThis cannot be undone.`
   );
   if (!confirmed) return;
 
   try {
     await api(`/api/systems/${system.id}`, { method: "DELETE" });
-    if (state.currentSystem?.id === system.id) state.currentSystem = null;
-    state.systems = state.systems.filter((item) => item.id !== system.id);
-    toast(`Deleted ${system.name}.`);
+    if (state.currentSystem?.id === system.id) {
+      state.currentSystem = null;
+      showDashboard();
+    }
+    toast(`Deleted "${system.name}".`);
     await loadDashboard();
   } catch (error) {
-    toast(error.message);
+    toast(error.message || "Delete failed. Please try again.");
   }
 }
 
 async function openSystem(systemId) {
-  const result = await api(`/api/systems/${systemId}`);
-  state.currentSystem = result.system;
-  state.originalColumns = result.originalColumns;
-  state.page = 1;
-  state.search = "";
-  qs("#recordSearch").value = "";
-  renderSystemHeader();
-  showSystemPage();
-  switchSystemTab("overview");
+  try {
+    const result = await api(`/api/systems/${systemId}`);
+    state.currentSystem = result.system;
+    state.originalColumns = result.originalColumns;
+    state.page = 1;
+    state.search = "";
+    qs("#recordSearch").value = "";
+    renderSystemHeader();
+    showSystemPage();
+    await switchSystemTab("overview");
+  } catch (error) {
+    toast(error.message || "Could not open system. Please try again.");
+  }
 }
 
 async function reloadCurrentSystem() {
   if (!state.currentSystem) return;
-  const result = await api(`/api/systems/${state.currentSystem.id}`);
-  state.currentSystem = result.system;
-  state.originalColumns = result.originalColumns;
-  renderSystemHeader();
+  try {
+    const result = await api(`/api/systems/${state.currentSystem.id}`);
+    state.currentSystem = result.system;
+    state.originalColumns = result.originalColumns;
+    renderSystemHeader();
+  } catch (error) {
+    // Non-fatal — the system may have been deleted in another tab.
+    console.warn("reloadCurrentSystem failed:", error.message);
+  }
 }
 
 function renderSystemHeader() {
@@ -453,7 +464,7 @@ function showDashboard() {
   closeClassifierStream();
   qs("#dashboardPage").classList.add("active");
   qs("#systemPage").classList.remove("active");
-  loadDashboard().catch((error) => toast(error.message));
+  loadDashboard().catch((error) => toast(error.message || "Dashboard failed to load."));
 }
 
 function showSystemPage() {
@@ -475,12 +486,16 @@ async function switchSystemTab(tab) {
   Object.entries(panelMap).forEach(([key, selector]) => qs(selector).classList.toggle("active", key === tab));
 
   if (!state.currentSystem) return;
-  if (tab === "overview") await loadOverview();
-  if (tab === "system-data") await loadRecords();
-  if (tab === "personal-data") await loadPersonalData();
-  if (tab === "system-context") await loadContext();
-  if (tab === "pdpl") await loadPdpl();
-  if (tab === "system-links") await loadLinks();
+  try {
+    if (tab === "overview") await loadOverview();
+    if (tab === "system-data") await loadRecords();
+    if (tab === "personal-data") await loadPersonalData();
+    if (tab === "system-context") await loadContext();
+    if (tab === "pdpl") await loadPdpl();
+    if (tab === "system-links") await loadLinks();
+  } catch (error) {
+    toast(error.message || "Failed to load tab content. Please try again.");
+  }
 }
 
 async function loadOverview() {
@@ -882,13 +897,27 @@ function editControl(record, key) {
 }
 
 async function updateRecord(recordId, updates) {
-  const result = await api(`/api/records/${recordId}`, { method: "PUT", body: JSON.stringify(updates) });
-  state.records = state.records.map((record) => (record.id === recordId ? result.record : record));
-  state.personalRecords = state.personalRecords.map((record) => (record.id === recordId ? result.record : record));
-  renderRecordsTable();
-  if (state.activeTab === "personal-data") await loadPersonalData();
-  if (state.activeTab === "pdpl") await loadPdpl();
-  renderOverview(result.summary);
+  try {
+    const result = await api(`/api/records/${recordId}`, { method: "PUT", body: JSON.stringify(updates) });
+    // Update in-memory caches so UI reflects the change immediately.
+    state.records = state.records.map((r) => (r.id === recordId ? result.record : r));
+    state.personalRecords = state.personalRecords.map((r) => (r.id === recordId ? result.record : r));
+
+    // Re-render whichever table is visible so the user sees the update.
+    if (state.activeTab === "system-data") renderRecordsTable();
+    if (state.activeTab === "personal-data") {
+      renderPersonalDataTable();
+      // Reload to ensure counts and approval state are accurate.
+      await loadPersonalData();
+    }
+    if (state.activeTab === "pdpl") await loadPdpl();
+
+    // Always refresh overview charts regardless of current tab so numbers are
+    // accurate when the user switches back.
+    renderOverview(result.summary);
+  } catch (error) {
+    toast(error.message || "Failed to save changes.");
+  }
 }
 
 async function approvePersonalOnPage() {
@@ -1075,7 +1104,11 @@ function closeActionsMenu() {
 }
 
 function setClassificationStatus(text, percentage) {
-  qs("#classificationStatus").textContent = text;
+  const statusEl = qs("#classificationStatus");
+  // The element starts hidden in the HTML; reveal it the first time it is set
+  // so the user can see classification progress and completion messages.
+  statusEl.classList.remove("hidden");
+  statusEl.textContent = text;
   const value = Number(percentage || 0);
   qs("#classificationProgress").value = value;
   qs("#classificationPercentLabel").textContent = `${Math.round(value)}% classified`;

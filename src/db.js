@@ -1,7 +1,12 @@
 const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcryptjs");
-const { DatabaseSync, backup } = require("node:sqlite");
+
+// node:sqlite ships with Node 22.6+; the standalone `backup` helper was added
+// in 22.13. We guard against it being absent so older 22.x patch releases work.
+const nodeSqlite = require("node:sqlite");
+const DatabaseSync = nodeSqlite.DatabaseSync;
+const backup = typeof nodeSqlite.backup === "function" ? nodeSqlite.backup : null;
 
 const projectRoot = path.resolve(__dirname, "..");
 const databaseDir = path.join(projectRoot, "database");
@@ -38,10 +43,22 @@ async function createDatabaseBackup(reason = "startup") {
   }
 
   const destination = backupFileName(reason);
-  if (connection) {
-    await backup(connection, destination);
-  } else {
-    fs.copyFileSync(databasePath, destination);
+  try {
+    if (connection && backup) {
+      // Hot backup via node:sqlite API — consistent even while writes are in flight.
+      await backup(connection, destination);
+    } else {
+      // Fallback: plain file copy (safe when no writes are happening).
+      fs.copyFileSync(databasePath, destination);
+    }
+  } catch (_backupError) {
+    // If the hot backup fails for any reason, fall back to file copy so startup
+    // is never blocked.
+    try {
+      fs.copyFileSync(databasePath, destination);
+    } catch (_copyError) {
+      return null;
+    }
   }
   return destination;
 }
@@ -54,8 +71,21 @@ function getDb() {
 
   ensureDatabaseDirectories();
   connection = new DatabaseSync(databasePath);
+
+  // WAL mode gives better concurrency and crash safety.
   connection.exec("PRAGMA journal_mode = WAL");
+  // NORMAL is sufficient with WAL and is faster than FULL.
+  connection.exec("PRAGMA synchronous = NORMAL");
+  // Enforce referential integrity so CASCADE deletes work correctly.
   connection.exec("PRAGMA foreign_keys = ON");
+  // Wait up to 5 s before giving up on a locked database (prevents immediate
+  // "SQLITE_BUSY" errors during concurrent requests).
+  connection.exec("PRAGMA busy_timeout = 5000");
+  // Keep temp tables and indices in RAM instead of a temp file.
+  connection.exec("PRAGMA temp_store = MEMORY");
+  // Use a ~16 MB page cache (negative value = KiB).
+  connection.exec("PRAGMA cache_size = -16000");
+
   global.__DCP_SQLITE_CONNECTION = connection;
   return connection;
 }
@@ -233,6 +263,35 @@ function createTables(db) {
       updatedAt TEXT NOT NULL,
       FOREIGN KEY (systemId) REFERENCES systems(id) ON DELETE CASCADE
     );
+  `);
+
+  // ── Performance indexes ───────────────────────────────────────────────────
+  // These speed up the most frequent queries: record listing, summary
+  // aggregates, personal-data lookups, active-job checks, and session lookup.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_data_records_systemId
+      ON data_records(systemId);
+
+    CREATE INDEX IF NOT EXISTS idx_data_records_systemId_personalData
+      ON data_records(systemId, personalData);
+
+    CREATE INDEX IF NOT EXISTS idx_data_records_systemId_rowIndex
+      ON data_records(systemId, rowIndex);
+
+    CREATE INDEX IF NOT EXISTS idx_classification_jobs_systemId_status
+      ON classification_jobs(systemId, status);
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_userId
+      ON sessions(userId);
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_expiresAt
+      ON sessions(expiresAt);
+
+    CREATE INDEX IF NOT EXISTS idx_context_points_systemId
+      ON context_points(systemId);
+
+    CREATE INDEX IF NOT EXISTS idx_system_links_systemId
+      ON system_links(systemId);
   `);
 }
 

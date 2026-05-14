@@ -450,9 +450,10 @@ function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links 
 
   if (links.length) {
     links.forEach((link) => {
+      const url = String(link.url || "");
       const added = sheet.addRow([
         link.title || "",
-        link.url || "",
+        url,               // populated but overridden below with a real hyperlink
         link.category || "",
         link.description || "",
         link.createdBy || "",
@@ -462,7 +463,12 @@ function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links 
         cell.border = border("E2E8F0");
         cell.alignment = { vertical: "top", wrapText: true };
       });
-      added.getCell(2).font = { color: { argb: "FF1D4ED8" }, underline: true };
+      // Make the URL cell a proper clickable hyperlink in Excel.
+      if (url) {
+        const urlCell = added.getCell(2);
+        urlCell.value = { text: url, hyperlink: url };
+        urlCell.font = { color: { argb: "FF1D4ED8" }, underline: true };
+      }
     });
   } else {
     const added = sheet.addRow(["No links stored", "", "", "", "", ""]);
@@ -479,6 +485,9 @@ function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links 
   applyOuterBorders(sheet, `A1:F${Math.max(headerRowNumber + Math.max(links.length, 1), headerRowNumber)}`);
 }
 
+// buildPdplSheet is not currently wired into buildSystemDataExport.
+// To include a dedicated PDPL sheet in the export, call it from there and
+// add its name to the module.exports if needed.
 function buildPdplSheet(workbook, { system, rows, pdpl }) {
   const sheet = workbook.addWorksheet("PDPL", {
     views: [{ state: "frozen", ySplit: 5, showGridLines: false }],

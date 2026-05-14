@@ -259,57 +259,103 @@ function getOriginalColumns(systemId) {
   return columns;
 }
 
+// Columns that exist as real DB columns and can be used in SQL ORDER BY / WHERE
+// without risk of SQL injection (we never interpolate user input directly into
+// SQL — only whitelisted names reach the ORDER BY clause).
+const SORTABLE_DB_COLUMNS = new Set([
+  "rowIndex", "tableName", "columnName", "dataType",
+  "confidentiality", "confReason", "personalData", "personalReason", "personalDataType",
+  "pseudonymizable", "anonymizable", "specialCategory", "confidenceScore",
+  "reviewStatus", "systemReviewStatus", "personalReviewStatus",
+  "personalApprovedAt", "personalApprovedBy",
+  "needsReview", "pushToClient", "policyRecommendation",
+  "owner", "steward", "reviewer", "uploadedFileName",
+  "auditTrail", "lastModifiedBy", "lastReviewedAt",
+  "createdAt", "updatedAt",
+]);
+
 function listRecords(systemId, options = {}) {
   const db = getDb();
-  const search = normalize(options.search).toLowerCase();
-  const sortBy = normalize(options.sortBy) || "rowIndex";
-  const sortDir = normalize(options.sortDir).toLowerCase() === "desc" ? -1 : 1;
+  const search      = normalize(options.search).toLowerCase();
+  const rawSortBy   = normalize(options.sortBy) || "rowIndex";
+  const sortDir     = normalize(options.sortDir).toLowerCase() === "desc" ? "DESC" : "ASC";
   const personalOnly = options.personalOnly === true || options.personalOnly === "true";
+  const page         = Math.max(1, Number(options.page || 1));
+  const pageSize     = Math.min(100, Math.max(1, Number(options.pageSize || 25)));
+  const offset       = (page - 1) * pageSize;
 
+  // ── Fast SQL path ──────────────────────────────────────────────────────────
+  // When there is no free-text search and the sort column is a real DB column
+  // we push everything — filtering, sorting, pagination — into SQLite.  For a
+  // system with thousands of records this avoids loading all rows into Node.
+  if (!search && SORTABLE_DB_COLUMNS.has(rawSortBy)) {
+    const whereParts = ["systemId = ?"];
+    const baseParams = [systemId];
+    if (personalOnly) whereParts.push("personalData = 'Yes'");
+    const where = `WHERE ${whereParts.join(" AND ")}`;
+
+    const { total } = db
+      .prepare(`SELECT COUNT(*) AS total FROM data_records ${where}`)
+      .get(...baseParams);
+
+    const rows = db
+      .prepare(
+        `SELECT * FROM data_records ${where}
+         ORDER BY ${rawSortBy} ${sortDir}
+         LIMIT ? OFFSET ?`
+      )
+      .all(...baseParams, pageSize, offset)
+      .map(recordToApi);
+
+    return {
+      rows,
+      // allRows is meaningful only for internal callers that pass a huge
+      // pageSize (≥ total records).  For normal paginated API calls it equals
+      // the current page, which is all callers outside of classificationJobTargets
+      // need (see that function's refactor below).
+      allRows: rows,
+      total: Number(total || 0),
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(Number(total || 0) / pageSize)),
+    };
+  }
+
+  // ── JS fallback path ───────────────────────────────────────────────────────
+  // Required when: (a) free-text search is active (must scan originalJson), or
+  // (b) the sort column comes from the uploaded file's originalJson.
   let rows = db
     .prepare("SELECT * FROM data_records WHERE systemId = ? ORDER BY rowIndex ASC")
     .all(systemId)
     .map(recordToApi);
 
-  if (personalOnly) {
-    rows = rows.filter((row) => row.personalData === "Yes");
-  }
+  if (personalOnly) rows = rows.filter((row) => row.personalData === "Yes");
 
   if (search) {
     rows = rows.filter((row) => {
       const haystack = [
-        row.tableName,
-        row.columnName,
-        row.dataType,
-        row.confidentiality,
-        row.personalDataType,
-        row.policyRecommendation,
-        row.owner,
-        row.steward,
-        row.reviewer,
+        row.tableName, row.columnName, row.dataType,
+        row.confidentiality, row.personalDataType, row.policyRecommendation,
+        row.owner, row.steward, row.reviewer,
         JSON.stringify(row.original),
-      ]
-        .join(" ")
-        .toLowerCase();
+      ].join(" ").toLowerCase();
       return haystack.includes(search);
     });
   }
 
+  const jsSortDir = sortDir === "DESC" ? -1 : 1;
   rows.sort((a, b) => {
-    const aValue = valueForSort(a, sortBy);
-    const bValue = valueForSort(b, sortBy);
-    if (typeof aValue === "number" && typeof bValue === "number") return (aValue - bValue) * sortDir;
-    return String(aValue || "").localeCompare(String(bValue || "")) * sortDir;
+    const aValue = valueForSort(a, rawSortBy);
+    const bValue = valueForSort(b, rawSortBy);
+    if (typeof aValue === "number" && typeof bValue === "number") return (aValue - bValue) * jsSortDir;
+    return String(aValue || "").localeCompare(String(bValue || "")) * jsSortDir;
   });
 
-  const total = rows.length;
-  const page = Math.max(1, Number(options.page || 1));
-  const pageSize = Math.min(100, Math.max(1, Number(options.pageSize || 25)));
-  const offset = (page - 1) * pageSize;
-
+  const total   = rows.length;
+  const allRows = rows;
   return {
     rows: rows.slice(offset, offset + pageSize),
-    allRows: rows,
+    allRows,
     total,
     page,
     pageSize,
@@ -323,29 +369,82 @@ function valueForSort(row, sortBy) {
   return "";
 }
 
+// ── getSystemSummary ─────────────────────────────────────────────────────────
+// Uses SQL aggregates so it NEVER loads every record row into Node memory.
+// Previously this fetched all rows for every API response, which was the main
+// performance bottleneck for large systems.
 function getSystemSummary(systemId) {
   const db = getDb();
-  const rows = db.prepare("SELECT * FROM data_records WHERE systemId = ?").all(systemId).map(recordToApi);
-  const total = rows.length;
-  const classified = rows.filter((row) => row.confidentiality && row.confidentiality !== "Pending").length;
-  const personal = rows.filter((row) => row.personalData === "Yes").length;
-  const pending = Math.max(0, total - classified);
-  const reviewQueue = rows.filter(
-    (row) =>
-      (row.systemReviewStatus !== "Approved" &&
-        (row.needsReview || Number(row.confidenceScore || 0) < 0.75)) ||
-      (row.personalData === "Yes" && row.personalReviewStatus !== "Approved")
-  ).length;
-  const lowConfidence = rows.filter((row) => Number(row.confidenceScore || 0) > 0 && Number(row.confidenceScore || 0) < 0.75).length;
-  const policyRecommendationCount = rows.filter((row) => normalize(row.policyRecommendation)).length;
-  const tablesWithPersonalData = new Set(rows.filter((row) => row.personalData === "Yes").map((row) => row.tableName)).size;
-  const confidentiality = countBy(rows, "confidentiality", ["Confidential", "Secret", "Top Secret", "Public", "Pending"]);
-  const personalDistribution = {
-    "No Personal Data": rows.filter((row) => row.personalData !== "Yes").length,
-    "Has Personal Data": personal,
-  };
-  const personalDataTypes = countPersonalDataTypes(rows);
-  const completedSystems = pending === 0 && total > 0 ? 1 : 0;
+
+  // Single-pass aggregate over data_records for the system.
+  const totals = db.prepare(`
+    SELECT
+      COUNT(*)                                                                AS total,
+      SUM(CASE WHEN confidentiality IS NOT NULL
+                AND confidentiality != 'Pending'        THEN 1 ELSE 0 END)  AS classified,
+      SUM(CASE WHEN personalData = 'Yes'                THEN 1 ELSE 0 END)  AS personal,
+      SUM(CASE WHEN confidentiality IS NULL
+                 OR confidentiality = 'Pending'         THEN 1 ELSE 0 END)  AS pending,
+      SUM(CASE WHEN confidenceScore IS NOT NULL
+               AND confidenceScore > 0
+               AND confidenceScore < 0.75               THEN 1 ELSE 0 END)  AS lowConfidence,
+      SUM(CASE WHEN policyRecommendation IS NOT NULL
+               AND TRIM(policyRecommendation) != ''     THEN 1 ELSE 0 END)  AS policyRecommendationCount,
+      SUM(CASE WHEN
+        (COALESCE(systemReviewStatus, 'Unreviewed') != 'Approved'
+          AND (needsReview = 1
+               OR (confidenceScore IS NOT NULL AND confidenceScore > 0 AND confidenceScore < 0.75)))
+        OR (personalData = 'Yes'
+            AND COALESCE(personalReviewStatus, 'Needs Review') != 'Approved')
+      THEN 1 ELSE 0 END)                                                     AS reviewQueue
+    FROM data_records WHERE systemId = ?
+  `).get(systemId);
+
+  // Confidentiality distribution — one row per level.
+  const confRows = db.prepare(`
+    SELECT COALESCE(confidentiality, 'Pending') AS lvl, COUNT(*) AS cnt
+    FROM   data_records
+    WHERE  systemId = ?
+    GROUP  BY COALESCE(confidentiality, 'Pending')
+  `).all(systemId);
+
+  // Count distinct tables that contain personal data.
+  const { tablesWithPersonalData } = db.prepare(`
+    SELECT COUNT(DISTINCT tableName) AS tablesWithPersonalData
+    FROM   data_records
+    WHERE  systemId = ? AND personalData = 'Yes'
+  `).get(systemId);
+
+  // Personal data type breakdown.
+  const pdtRows = db.prepare(`
+    SELECT COALESCE(NULLIF(TRIM(personalDataType), ''), 'Personal Data') AS type,
+           COUNT(*) AS cnt
+    FROM   data_records
+    WHERE  systemId = ? AND personalData = 'Yes'
+    GROUP  BY COALESCE(NULLIF(TRIM(personalDataType), ''), 'Personal Data')
+    ORDER  BY cnt DESC
+  `).all(systemId);
+
+  const total      = Number(totals?.total                  || 0);
+  const classified = Number(totals?.classified             || 0);
+  const personal   = Number(totals?.personal               || 0);
+  const pending    = Number(totals?.pending                || 0);
+
+  // Build confidentiality map — always include every level so charts render.
+  const confidentiality = { Confidential: 0, Secret: 0, "Top Secret": 0, Public: 0, Pending: 0 };
+  for (const row of confRows) {
+    const key = row.lvl || "Pending";
+    if (Object.prototype.hasOwnProperty.call(confidentiality, key)) {
+      confidentiality[key] = Number(row.cnt);
+    }
+  }
+
+  // Personal data types — merge any duplicate labels (e.g. same type, two spellings).
+  const personalDataTypes = {};
+  for (const row of pdtRows) {
+    const label = String(row.type || "Personal Data");
+    personalDataTypes[label] = (personalDataTypes[label] || 0) + Number(row.cnt);
+  }
 
   return {
     totalRecords: total,
@@ -355,28 +454,19 @@ function getSystemSummary(systemId) {
     personalPercentage: pct(personal, total),
     pending,
     pendingPercentage: pct(pending, total),
-    reviewQueue,
-    lowConfidence,
-    policyRecommendationCount,
-    tablesWithPersonalData,
+    reviewQueue:               Number(totals?.reviewQueue              || 0),
+    lowConfidence:             Number(totals?.lowConfidence            || 0),
+    policyRecommendationCount: Number(totals?.policyRecommendationCount || 0),
+    tablesWithPersonalData:    Number(tablesWithPersonalData           || 0),
     confidentiality,
-    personalDistribution,
+    personalDistribution: {
+      "No Personal Data": total - personal,
+      "Has Personal Data": personal,
+    },
     personalDataTypes,
     classificationProgress: pct(classified, total),
-    completedSystems,
+    completedSystems: pending === 0 && total > 0 ? 1 : 0,
   };
-}
-
-function countPersonalDataTypes(rows) {
-  const counts = {};
-  for (const row of rows) {
-    if (row.personalData !== "Yes") continue;
-    const label = normalize(row.personalDataType) || "Personal Data";
-    counts[label] = (counts[label] || 0) + 1;
-  }
-  return Object.fromEntries(
-    Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-  );
 }
 
 function classificationNeedsReview(result) {
@@ -490,15 +580,27 @@ function classificationJobPage(job, record) {
 function classificationJobTargets(systemId, job) {
   const options = safeJson(job.optionsJson, {});
   const mode = job.mode === "all" ? "all" : "page";
+
+  if (mode === "all") {
+    // Fetch every record for this system directly — no pagination needed.
+    // This avoids the allRows / pageSize mismatch that existed when going
+    // through listRecords with an arbitrarily small pageSize.
+    const db = getDb();
+    return db
+      .prepare("SELECT * FROM data_records WHERE systemId = ? ORDER BY rowIndex ASC")
+      .all(systemId)
+      .map(recordToApi);
+  }
+
+  // Page mode — listRecords returns exactly the page the job was created for.
   const recordSet = listRecords(systemId, {
-    page: options.page || 1,
-    pageSize: job.pageSize || options.pageSize || 25,
-    search: mode === "all" ? "" : options.search,
-    sortBy: mode === "all" ? "rowIndex" : options.sortBy || "rowIndex",
-    sortDir: mode === "all" ? "asc" : options.sortDir || "asc",
+    page:     options.page     || 1,
+    pageSize: job.pageSize     || options.pageSize || 25,
+    search:   options.search   || "",
+    sortBy:   options.sortBy   || "rowIndex",
+    sortDir:  options.sortDir  || "asc",
   });
-  const records = mode === "all" ? recordSet.allRows : recordSet.rows;
-  return records.slice().sort((a, b) => a.rowIndex - b.rowIndex);
+  return recordSet.rows.slice().sort((a, b) => a.rowIndex - b.rowIndex);
 }
 
 function classificationJobCanContinue(db, jobId, systemId) {
@@ -718,16 +820,6 @@ function failClassificationJob(jobId, error) {
       WHERE id = ?`
   ).run(error.message || "Classification job failed", failedAt, failedAt, jobId);
   emitClassificationJobEvent(jobId, "classification-error", getClassificationJobPayload(jobId));
-}
-
-function countBy(rows, key, labels) {
-  const result = {};
-  for (const label of labels) result[label] = 0;
-  for (const row of rows) {
-    const value = row[key] || "Pending";
-    result[value] = (result[value] || 0) + 1;
-  }
-  return result;
 }
 
 function pct(part, total) {
@@ -1093,6 +1185,11 @@ app.put("/api/records/:recordId", requireAuth, (req, res) => {
 
   const updates = [];
   const values = [];
+  // Track whether lastReviewedAt has already been pushed to avoid the SQLite
+  // "column specified more than once" error if both `reviewed` and
+  // `reviewStatus=Approved` arrive in the same request body.
+  let lastReviewedAtSet = false;
+
   if (Object.prototype.hasOwnProperty.call(req.body, "reviewed")) {
     const reviewed = Boolean(req.body.reviewed);
     updates.push("systemReviewStatus = ?");
@@ -1100,6 +1197,7 @@ app.put("/api/records/:recordId", requireAuth, (req, res) => {
     if (reviewed) {
       updates.push("lastReviewedAt = ?");
       values.push(nowIso());
+      lastReviewedAtSet = true;
     }
   }
 
@@ -1120,7 +1218,7 @@ app.put("/api/records/:recordId", requireAuth, (req, res) => {
     }
   }
 
-  if (req.body.reviewStatus === "Approved") {
+  if (req.body.reviewStatus === "Approved" && !lastReviewedAtSet) {
     updates.push("lastReviewedAt = ?");
     values.push(nowIso());
   }
@@ -1163,7 +1261,14 @@ app.post("/api/systems/:id/personal-approvals", requireAuth, requireSystemAccess
   ).run(now, req.user.email, now, req.user.email, req.system.id, ...recordIds);
   db.exec("PRAGMA wal_checkpoint(PASSIVE)");
 
-  const records = listRecords(req.system.id, { page: 1, pageSize: 100000, personalOnly: true }).allRows;
+  // Fetch ALL personal-data records directly — avoids the pageSize cap that
+  // listRecords applies for paginated API responses.
+  const records = db
+    .prepare(
+      "SELECT * FROM data_records WHERE systemId = ? AND personalData = 'Yes' ORDER BY rowIndex ASC"
+    )
+    .all(req.system.id)
+    .map(recordToApi);
   res.json({
     records,
     summary: getSystemSummary(req.system.id),
@@ -1171,12 +1276,23 @@ app.post("/api/systems/:id/personal-approvals", requireAuth, requireSystemAccess
 });
 
 app.get("/api/systems/:id/review-queue", requireAuth, requireSystemAccess, (req, res) => {
-  const rows = listRecords(req.system.id, { page: 1, pageSize: 100 }).allRows.filter(
-    (row) =>
-      (row.systemReviewStatus !== "Approved" &&
-        (row.needsReview || Number(row.confidenceScore || 0) < 0.75)) ||
-      (row.personalData === "Yes" && row.personalReviewStatus !== "Approved")
-  );
+  // Use a direct SQL query so we never pull every record into Node memory.
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT * FROM data_records
+       WHERE systemId = ?
+         AND (
+           (COALESCE(systemReviewStatus,'Unreviewed') != 'Approved'
+             AND (needsReview = 1
+                  OR (confidenceScore IS NOT NULL AND confidenceScore > 0 AND confidenceScore < 0.75)))
+           OR (personalData = 'Yes'
+               AND COALESCE(personalReviewStatus,'Needs Review') != 'Approved')
+         )
+       ORDER BY rowIndex ASC`
+    )
+    .all(req.system.id)
+    .map(recordToApi);
   res.json({ records: rows, count: rows.length });
 });
 
@@ -1244,7 +1360,13 @@ app.get("/api/systems/:id/pdpl", requireAuth, requireSystemAccess, (req, res) =>
     notes = db.prepare("SELECT * FROM pdpl_notes WHERE systemId = ?").get(req.system.id);
   }
 
-  const personalRows = listRecords(req.system.id, { page: 1, pageSize: 100000, personalOnly: true }).allRows;
+  // Fetch ALL personal-data records directly — avoids the pageSize cap.
+  const personalRows = db
+    .prepare(
+      "SELECT * FROM data_records WHERE systemId = ? AND personalData = 'Yes' ORDER BY rowIndex ASC"
+    )
+    .all(req.system.id)
+    .map(recordToApi);
   const compliant = personalRows.filter((row) => row.personalReviewStatus === "Approved").length;
   const nonCompliant = personalRows.filter((row) => row.specialCategory === "Yes" && row.personalReviewStatus !== "Approved").length;
   const needsReview = Math.max(0, personalRows.length - compliant - nonCompliant);
@@ -1454,118 +1576,10 @@ app.get("/api/systems/:id/classification-jobs/:jobId/stream", requireAuth, requi
   }
 });
 
-app.get("/api/systems/:id/classify-stream", requireAuth, requireSystemAccess, async (req, res) => {
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
-
-  let clientConnected = true;
-  req.on("close", () => {
-    clientConnected = false;
-  });
-
-  const send = (event, payload) => {
-    if (!clientConnected || res.writableEnded || res.destroyed) return false;
-    try {
-      res.write(`event: ${event}\n`);
-      res.write(`data: ${JSON.stringify(payload)}\n\n`);
-      return true;
-    } catch (_error) {
-      clientConnected = false;
-      return false;
-    }
-  };
-  const heartbeat = setInterval(() => {
-    send("heartbeat", { at: nowIso() });
-  }, 15000);
-
-  try {
-    const db = getDb();
-    const contextPoints = db.prepare("SELECT tag, content FROM context_points WHERE systemId = ?").all(req.system.id);
-    const mode = req.query.mode === "all" ? "all" : "page";
-    const pageOptions = {
-      page: req.query.page || 1,
-      pageSize: mode === "all" ? 100000 : Math.min(50, Number(req.query.pageSize || 50)),
-      search: mode === "all" ? "" : req.query.search,
-      sortBy: "rowIndex",
-      sortDir: "asc",
-    };
-    const recordSet = listRecords(req.system.id, pageOptions);
-    const records = (mode === "all" ? recordSet.allRows : recordSet.rows.slice(0, 50))
-      .slice()
-      .sort((a, b) => a.rowIndex - b.rowIndex);
-
-    send("start", {
-      mode,
-      total: records.length,
-      fileName: req.system.lastUploadFileName || records[0]?.uploadedFileName || "",
-      contextPoints: contextPoints.length,
-    });
-
-    if (!records.length) {
-      send("done", { total: 0, summary: getSystemSummary(req.system.id) });
-      res.end();
-      return;
-    }
-
-    let processed = 0;
-    let fallbackWarningSent = false;
-    let apiCreditWarningSent = false;
-    for (const record of records) {
-      let results;
-      try {
-        results = await classifyRecords([record], contextPoints);
-        if (results.apiWarning?.code === "OPENAI_NO_CREDITS" && !apiCreditWarningSent) {
-          apiCreditWarningSent = true;
-          send("warning", results.apiWarning);
-        }
-      } catch (error) {
-        results = new Map();
-        results.set(record.id, classifyRecordLocally(record, contextPoints));
-        if (!fallbackWarningSent) {
-          fallbackWarningSent = true;
-          send("warning", {
-            message: "AI classification failed for one row, so local rules were used and classification continued.",
-            detail: error.message || "Classification fallback used",
-          });
-        }
-      }
-
-      const result = results.get(record.id) || classifyRecordLocally(record, contextPoints);
-      const updated = saveClassificationResult(db, record.id, result);
-      processed += 1;
-      const summary = updateSystemClassificationState(req.system.id);
-
-      send("row", {
-        processed,
-        total: records.length,
-        percentage: pct(processed, records.length),
-        record: recordToApi(updated),
-        summary,
-      });
-      send("progress", {
-        processed,
-        total: records.length,
-        percentage: pct(processed, records.length),
-        summary,
-      });
-    }
-
-    const summary = updateSystemClassificationState(req.system.id);
-    db.exec("PRAGMA wal_checkpoint(PASSIVE)");
-    send("done", { total: records.length, summary });
-  } catch (error) {
-    send("classification-error", { error: error.message || "Classification failed" });
-  } finally {
-    clearInterval(heartbeat);
-    if (!res.writableEnded && !res.destroyed) {
-      res.end();
-    }
-  }
-});
+// NOTE: The legacy /api/systems/:id/classify-stream endpoint has been removed.
+// All classification is now handled through the job-based endpoint:
+//   POST   /api/systems/:id/classification-jobs
+//   GET    /api/systems/:id/classification-jobs/:jobId/stream
 
 app.get("/api/systems/:id/export", requireAuth, requireSystemAccess, async (req, res) => {
   const db = getDb();
@@ -1623,7 +1637,6 @@ async function startServer() {
     console.log(`SQLite backups: ${backupDir}`);
   });
 }
-
 startServer().catch((error) => {
   console.error("Failed to start platform:", error);
   process.exit(1);
