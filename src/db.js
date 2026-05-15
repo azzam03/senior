@@ -9,7 +9,13 @@ const DatabaseSync = nodeSqlite.DatabaseSync;
 const backup = typeof nodeSqlite.backup === "function" ? nodeSqlite.backup : null;
 
 const projectRoot = path.resolve(__dirname, "..");
-const databaseDir = path.join(projectRoot, "database");
+
+// On Render, use the persistent disk mounted at /var/data so the database
+// survives deploys and restarts.  Locally (and on any other host) fall back
+// to the project-local ./database directory.
+const databaseDir = process.env.RENDER
+  ? "/var/data/database"
+  : path.join(projectRoot, "database");
 const backupDir = path.join(databaseDir, "backups");
 const databasePath = path.join(databaseDir, "app.db");
 
@@ -74,8 +80,11 @@ function getDb() {
 
   // WAL mode gives better concurrency and crash safety.
   connection.exec("PRAGMA journal_mode = WAL");
-  // NORMAL is sufficient with WAL and is faster than FULL.
-  connection.exec("PRAGMA synchronous = NORMAL");
+  // FULL synchronous guarantees every committed write is on disk before we
+  // return. This is critical: NORMAL can leave WAL frames un-flushed, so if
+  // the process is killed between a write and the next auto-checkpoint those
+  // frames may be lost. FULL prevents that.
+  connection.exec("PRAGMA synchronous = FULL");
   // Enforce referential integrity so CASCADE deletes work correctly.
   connection.exec("PRAGMA foreign_keys = ON");
   // Wait up to 5 s before giving up on a locked database (prevents immediate
@@ -85,6 +94,9 @@ function getDb() {
   connection.exec("PRAGMA temp_store = MEMORY");
   // Use a ~16 MB page cache (negative value = KiB).
   connection.exec("PRAGMA cache_size = -16000");
+  // Auto-checkpoint every 500 pages (~2 MB).  Default is 1000 which can
+  // leave large amounts of data only in the WAL file.
+  connection.exec("PRAGMA wal_autocheckpoint = 500");
 
   global.__DCP_SQLITE_CONNECTION = connection;
   return connection;
@@ -100,6 +112,16 @@ async function initDatabase() {
   createTables(db);
   runSafeMigrations(db);
   seedAdminIfNeeded(db);
+
+  // Force a FULL checkpoint on every startup.  This merges any WAL frames
+  // that survived a previous unclean shutdown into the main database file,
+  // ensuring the file on disk is always up-to-date before we accept requests.
+  try {
+    db.exec("PRAGMA wal_checkpoint(FULL)");
+  } catch (_err) {
+    // Non-fatal — checkpoint failure at startup just means the WAL will be
+    // merged during normal operation.
+  }
 }
 
 function createTables(db) {

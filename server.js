@@ -791,7 +791,7 @@ async function runClassificationJob(jobId) {
     }
 
     const summary = updateSystemClassificationState(job.systemId);
-    db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    db.exec("PRAGMA wal_checkpoint(FULL)");
     emitClassificationJobEvent(jobId, "progress", getClassificationJobPayload(jobId, null, summary));
   }
 
@@ -804,7 +804,7 @@ async function runClassificationJob(jobId) {
             updatedAt = ?
       WHERE id = ?`
   ).run(nowIso(), nowIso(), jobId);
-  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+  db.exec("PRAGMA wal_checkpoint(FULL)");
   emitClassificationJobEvent(jobId, "done", getClassificationJobPayload(jobId, null, summary));
 }
 
@@ -1059,7 +1059,7 @@ app.delete("/api/systems/:id", requireAuth, requireSystemAccess, async (req, res
       WHERE systemId = ? AND status IN ('Queued', 'Running')`
   ).run("System was deleted before classification completed.", deletedAt, deletedAt, req.system.id);
   db.prepare("DELETE FROM systems WHERE id = ?").run(req.system.id);
-  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+  db.exec("PRAGMA wal_checkpoint(FULL)");
   res.json({
     message: "System and all related records were deleted.",
     dashboard: getDashboardSummary(req.user.id),
@@ -1230,7 +1230,7 @@ app.put("/api/records/:recordId", requireAuth, (req, res) => {
   values.push(record.id);
 
   db.prepare(`UPDATE data_records SET ${updates.join(", ")} WHERE id = ?`).run(...values);
-  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+  db.exec("PRAGMA wal_checkpoint(FULL)");
   const updated = db.prepare("SELECT * FROM data_records WHERE id = ?").get(record.id);
   res.json({ record: recordToApi(updated), summary: getSystemSummary(updated.systemId) });
 });
@@ -1259,7 +1259,7 @@ app.post("/api/systems/:id/personal-approvals", requireAuth, requireSystemAccess
         AND personalData = 'Yes'
         AND id IN (${placeholders})`
   ).run(now, req.user.email, now, req.user.email, req.system.id, ...recordIds);
-  db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+  db.exec("PRAGMA wal_checkpoint(FULL)");
 
   // Fetch ALL personal-data records directly — avoids the pageSize cap that
   // listRecords applies for paginated API responses.
@@ -1627,6 +1627,26 @@ app.use((error, _req, res, _next) => {
   console.error(error);
   res.status(500).json({ error: error.message || "Unexpected server error" });
 });
+
+// ── Graceful shutdown ────────────────────────────────────────────────────────
+// On SIGTERM / SIGINT we run a FULL WAL checkpoint before exiting.  This
+// ensures every committed write is merged from the WAL into the main database
+// file so that the on-disk app.db is always up-to-date even when the process
+// is stopped cleanly (e.g. by a process manager, Ctrl-C, or a deployment
+// script that restarts the server).
+function gracefulShutdown(signal) {
+  console.log(`\n${signal} — flushing WAL to database before exit...`);
+  try {
+    const db = getDb();
+    db.exec("PRAGMA wal_checkpoint(FULL)");
+    console.log("WAL checkpoint complete.");
+  } catch (err) {
+    console.error("WAL checkpoint failed during shutdown:", err.message);
+  }
+  process.exit(0);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
 
 async function startServer() {
   await initDatabase();

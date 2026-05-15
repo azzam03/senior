@@ -1,7 +1,17 @@
 node_modules/
 .env.local
 npm-debug.log*
-database/backups/*.db
+
+# SQLite database — NEVER commit the live database or its WAL/SHM files.
+# git replacing app.db invalidates the WAL (checksum mismatch) and silently
+# discards every write that had not yet been checkpointed into the main file.
+database/app.db
+database/app.db-wal
+database/app.db-shm
+
+# Backup snapshots are runtime artefacts, not source code.
+database/backups/
+
 uploads/
 logs/
 tmp/

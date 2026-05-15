@@ -62,6 +62,18 @@ async function api(url, options = {}) {
   });
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
+
+  // Session expired while the user was on the page.  Redirect to login so
+  // they don't see a confusing series of toast errors — their work is safe in
+  // the database; they just need to sign in again.
+  if (response.status === 401 && state.user) {
+    state.user = null;
+    window.location.replace("/");
+    // Return a never-resolving promise so the calling code doesn't run
+    // after the redirect is initiated.
+    return new Promise(() => {});
+  }
+
   if (!response.ok) {
     throw new Error(data.error || data.message || "Request failed");
   }
@@ -1284,6 +1296,23 @@ function toast(message, options = {}) {
   if (persistent) {
     const close = document.createElement("button");
     close.className = "toast-close";
+    close.type = "button";
+    close.setAttribute("aria-label", "Dismiss notification");
+    close.textContent = "x";
+    close.addEventListener("click", () => {
+      node.classList.remove("show");
+      node.dataset.locked = "false";
+      clearTimeout(node._timer);
+    });
+    node.append(close);
+  }
+
+  node.classList.add("show");
+  clearTimeout(node._timer);
+  if (!persistent) {
+    node._timer = setTimeout(() => node.classList.remove("show"), 4200);
+  }
+}
     close.type = "button";
     close.setAttribute("aria-label", "Dismiss notification");
     close.textContent = "x";
