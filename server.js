@@ -12,6 +12,8 @@ dotenv.config({ path: path.join(__dirname, ".env.local") });
 const {
   initDatabase,
   getDb,
+  checkpointDatabase,
+  closeDatabase,
   createDatabaseBackup,
   databasePath,
   backupDir,
@@ -94,6 +96,7 @@ function createSession(res, userId) {
   db.prepare(
     "INSERT INTO sessions (id, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)"
   ).run(token, userId, nowIso(), expiresAt);
+  checkpointDatabase("FULL");
   res.cookie(SESSION_COOKIE_NAME, token, {
     ...SESSION_COOKIE_OPTIONS,
     maxAge: SESSION_DAYS * 24 * 60 * 60 * 1000,
@@ -105,6 +108,7 @@ function clearSession(req, res) {
   const token = req.cookies?.[SESSION_COOKIE_NAME];
   if (token) {
     db.prepare("DELETE FROM sessions WHERE id = ?").run(token);
+    checkpointDatabase("FULL");
   }
   res.clearCookie(SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS);
   res.cookie(SESSION_COOKIE_NAME, "", {
@@ -135,6 +139,7 @@ function authOptional(req, res, next) {
 
   if (!session) {
     db.prepare("DELETE FROM sessions WHERE id = ? OR expiresAt <= ?").run(token, nowIso());
+    checkpointDatabase("FULL");
     res.clearCookie(SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS);
     req.user = null;
     next();
@@ -631,6 +636,7 @@ function findActiveClassificationJob(systemId) {
             updatedAt = ?
       WHERE id = ?`
   ).run("Classification job stopped before completion.", nowIso(), nowIso(), job.id);
+  checkpointDatabase("FULL");
   return null;
 }
 
@@ -672,6 +678,7 @@ function createClassificationJob({ systemId, mode, page, pageSize, search, sortB
     now,
     now
   );
+  checkpointDatabase("FULL");
   return getClassificationJob(db, id);
 }
 
@@ -705,6 +712,7 @@ async function runClassificationJob(jobId) {
             updatedAt = ?
       WHERE id = ?`
   ).run(records.length, startedAt, startedAt, jobId);
+  checkpointDatabase("FULL");
 
   job = getClassificationJob(db, jobId);
   emitClassificationJobEvent(jobId, "start", getClassificationJobPayload(jobId));
@@ -731,6 +739,7 @@ async function runClassificationJob(jobId) {
               updatedAt = ?
         WHERE id = ?`
     ).run(firstRecord.id, firstRecord.rowIndex, currentPage, nowIso(), jobId);
+    checkpointDatabase("FULL");
     emitClassificationJobEvent(jobId, "progress", getClassificationJobPayload(jobId));
 
     let results;
@@ -743,6 +752,7 @@ async function runClassificationJob(jobId) {
           nowIso(),
           jobId
         );
+        checkpointDatabase("FULL");
         emitClassificationJobEvent(jobId, "warning", results.apiWarning);
       }
     } catch (error) {
@@ -762,6 +772,7 @@ async function runClassificationJob(jobId) {
           nowIso(),
           jobId
         );
+        checkpointDatabase("FULL");
         emitClassificationJobEvent(jobId, "warning", warning);
       }
     }
@@ -782,6 +793,7 @@ async function runClassificationJob(jobId) {
                 updatedAt = ?
           WHERE id = ?`
       ).run(processed, record.id, record.rowIndex, currentPage, nowIso(), jobId);
+      checkpointDatabase("FULL");
 
       emitClassificationJobEvent(
         jobId,
@@ -791,7 +803,7 @@ async function runClassificationJob(jobId) {
     }
 
     const summary = updateSystemClassificationState(job.systemId);
-    db.exec("PRAGMA wal_checkpoint(FULL)");
+    checkpointDatabase("FULL");
     emitClassificationJobEvent(jobId, "progress", getClassificationJobPayload(jobId, null, summary));
   }
 
@@ -804,7 +816,7 @@ async function runClassificationJob(jobId) {
             updatedAt = ?
       WHERE id = ?`
   ).run(nowIso(), nowIso(), jobId);
-  db.exec("PRAGMA wal_checkpoint(FULL)");
+  checkpointDatabase("FULL");
   emitClassificationJobEvent(jobId, "done", getClassificationJobPayload(jobId, null, summary));
 }
 
@@ -819,6 +831,7 @@ function failClassificationJob(jobId, error) {
             updatedAt = ?
       WHERE id = ?`
   ).run(error.message || "Classification job failed", failedAt, failedAt, jobId);
+  checkpointDatabase("FULL");
   emitClassificationJobEvent(jobId, "classification-error", getClassificationJobPayload(jobId));
 }
 
@@ -916,6 +929,7 @@ app.post("/api/auth/forgot-password", (req, res) => {
   db.prepare(
     "INSERT INTO password_resets (userId, tokenHash, createdAt, expiresAt) VALUES (?, ?, ?, ?)"
   ).run(user.id, hashToken(token), nowIso(), new Date(Date.now() + 60 * 60 * 1000).toISOString());
+  checkpointDatabase("FULL");
 
   res.json({
     message: "Reset token generated. In production this would be delivered by email.",
@@ -943,6 +957,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 12);
   db.prepare("UPDATE users SET passwordHash = ?, updatedAt = ? WHERE id = ?").run(passwordHash, nowIso(), reset.userId);
   db.prepare("UPDATE password_resets SET usedAt = ? WHERE id = ?").run(nowIso(), reset.id);
+  checkpointDatabase("FULL");
   res.json({ message: "Password reset complete." });
 });
 
@@ -953,6 +968,7 @@ app.get("/api/auth/me", requireAuth, (req, res) => {
 app.post("/api/auth/logout", authOptional, (req, res) => {
   if (req.user) {
     getDb().prepare("DELETE FROM sessions WHERE userId = ?").run(req.user.id);
+    checkpointDatabase("FULL");
   }
   clearSession(req, res);
   res.json({ message: "Signed out." });
@@ -1010,6 +1026,7 @@ app.post("/api/systems", requireAuth, (req, res) => {
       nowIso(),
       req.user.email
     );
+  checkpointDatabase("FULL");
 
   const system = db.prepare("SELECT * FROM systems WHERE id = ?").get(info.lastInsertRowid);
   res.status(201).json({ system: { ...system, summary: getSystemSummary(system.id) } });
@@ -1042,6 +1059,7 @@ app.put("/api/systems/:id", requireAuth, requireSystemAccess, (req, res) => {
     req.user.email,
     req.system.id
   );
+  checkpointDatabase("FULL");
   const system = db.prepare("SELECT * FROM systems WHERE id = ?").get(req.system.id);
   res.json({ system: { ...system, summary: getSystemSummary(system.id) } });
 });
@@ -1059,7 +1077,7 @@ app.delete("/api/systems/:id", requireAuth, requireSystemAccess, async (req, res
       WHERE systemId = ? AND status IN ('Queued', 'Running')`
   ).run("System was deleted before classification completed.", deletedAt, deletedAt, req.system.id);
   db.prepare("DELETE FROM systems WHERE id = ?").run(req.system.id);
-  db.exec("PRAGMA wal_checkpoint(FULL)");
+  checkpointDatabase("FULL");
   res.json({
     message: "System and all related records were deleted.",
     dashboard: getDashboardSummary(req.user.id),
@@ -1122,6 +1140,7 @@ app.post("/api/systems/:id/upload", requireAuth, requireSystemAccess, upload.sin
     db.exec("ROLLBACK");
     throw error;
   }
+  checkpointDatabase("FULL");
   res.json({
     fileName,
     rowsImported: parsed.rows.length,
@@ -1230,7 +1249,7 @@ app.put("/api/records/:recordId", requireAuth, (req, res) => {
   values.push(record.id);
 
   db.prepare(`UPDATE data_records SET ${updates.join(", ")} WHERE id = ?`).run(...values);
-  db.exec("PRAGMA wal_checkpoint(FULL)");
+  checkpointDatabase("FULL");
   const updated = db.prepare("SELECT * FROM data_records WHERE id = ?").get(record.id);
   res.json({ record: recordToApi(updated), summary: getSystemSummary(updated.systemId) });
 });
@@ -1259,7 +1278,7 @@ app.post("/api/systems/:id/personal-approvals", requireAuth, requireSystemAccess
         AND personalData = 'Yes'
         AND id IN (${placeholders})`
   ).run(now, req.user.email, now, req.user.email, req.system.id, ...recordIds);
-  db.exec("PRAGMA wal_checkpoint(FULL)");
+  checkpointDatabase("FULL");
 
   // Fetch ALL personal-data records directly — avoids the pageSize cap that
   // listRecords applies for paginated API responses.
@@ -1321,6 +1340,7 @@ app.post("/api/systems/:id/context", requireAuth, requireSystemAccess, (req, res
   const info = db
     .prepare("INSERT INTO context_points (systemId, tag, content, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?)")
     .run(req.system.id, tag, content, nowIso(), nowIso(), req.user.email);
+  checkpointDatabase("FULL");
   const point = db.prepare("SELECT * FROM context_points WHERE id = ?").get(info.lastInsertRowid);
   res.status(201).json({ point });
 });
@@ -1344,6 +1364,7 @@ app.delete("/api/context/:pointId", requireAuth, (req, res) => {
     return;
   }
   db.prepare("DELETE FROM context_points WHERE id = ?").run(req.params.pointId);
+  checkpointDatabase("FULL");
   res.json({ message: "Context point removed." });
 });
 
@@ -1357,6 +1378,7 @@ app.get("/api/systems/:id/pdpl", requireAuth, requireSystemAccess, (req, res) =>
         crossBorderTransferFlags, createdAt, updatedAt, updatedBy
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(req.system.id, "", "Needs Review", "Needs Review", "No Flags Recorded", nowIso(), nowIso(), req.user.email);
+    checkpointDatabase("FULL");
     notes = db.prepare("SELECT * FROM pdpl_notes WHERE systemId = ?").get(req.system.id);
   }
 
@@ -1410,6 +1432,7 @@ app.put("/api/systems/:id/pdpl", requireAuth, requireSystemAccess, (req, res) =>
     nowIso(),
     req.user.email
   );
+  checkpointDatabase("FULL");
   const notes = db.prepare("SELECT * FROM pdpl_notes WHERE systemId = ?").get(req.system.id);
   res.json({ notes });
 });
@@ -1434,6 +1457,7 @@ app.post("/api/systems/:id/links", requireAuth, requireSystemAccess, (req, res) 
   const info = db
     .prepare("INSERT INTO system_links (systemId, title, url, category, description, createdAt, updatedAt, createdBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     .run(req.system.id, title, url, category, description, nowIso(), nowIso(), req.user.email);
+  checkpointDatabase("FULL");
   const link = db.prepare("SELECT * FROM system_links WHERE id = ?").get(info.lastInsertRowid);
   res.status(201).json({ link });
 });
@@ -1460,6 +1484,7 @@ app.put("/api/links/:linkId", requireAuth, (req, res) => {
     nowIso(),
     link.id
   );
+  checkpointDatabase("FULL");
   const updated = db.prepare("SELECT * FROM system_links WHERE id = ?").get(link.id);
   res.json({ link: updated });
 });
@@ -1477,6 +1502,7 @@ app.delete("/api/links/:linkId", requireAuth, (req, res) => {
     return;
   }
   db.prepare("DELETE FROM system_links WHERE id = ?").run(req.params.linkId);
+  checkpointDatabase("FULL");
   res.json({ message: "Link removed." });
 });
 
@@ -1637,8 +1663,7 @@ app.use((error, _req, res, _next) => {
 function gracefulShutdown(signal) {
   console.log(`\n${signal} — flushing WAL to database before exit...`);
   try {
-    const db = getDb();
-    db.exec("PRAGMA wal_checkpoint(FULL)");
+    closeDatabase();
     console.log("WAL checkpoint complete.");
   } catch (err) {
     console.error("WAL checkpoint failed during shutdown:", err.message);
@@ -1647,6 +1672,13 @@ function gracefulShutdown(signal) {
 }
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
+process.on("beforeExit", () => {
+  try {
+    closeDatabase();
+  } catch (err) {
+    console.error("WAL checkpoint failed before exit:", err.message);
+  }
+});
 
 async function startServer() {
   await initDatabase();

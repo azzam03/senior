@@ -1,5 +1,5 @@
 const crypto = require("crypto");
-const { getDb } = require("./db");
+const { getDb, checkpointDatabase } = require("./db");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -58,6 +58,7 @@ async function classifyRecords(records, contextPoints) {
       upsert.run(cacheKey, record.tableName, record.columnName, contextHash, JSON.stringify(stripSource(result)), now, now);
       resultMap.set(record.id, result);
     }
+    checkpointDatabase("FULL");
     if (apiWarning) resultMap.apiWarning = apiWarning;
   }
 

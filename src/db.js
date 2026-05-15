@@ -47,6 +47,13 @@ async function createDatabaseBackup(reason = "startup") {
   }
 
   const destination = backupFileName(reason);
+  if (connection) {
+    try {
+      connection.exec("PRAGMA wal_checkpoint(FULL)");
+    } catch (_checkpointError) {
+      // Backup still proceeds; hot backup can include WAL content even if this fails.
+    }
+  }
   try {
     if (connection && backup) {
       // Hot backup via node:sqlite API — consistent even while writes are in flight.
@@ -100,6 +107,29 @@ function getDb() {
   return connection;
 }
 
+function checkpointDatabase(mode = "FULL") {
+  const safeMode = ["PASSIVE", "FULL", "RESTART", "TRUNCATE"].includes(String(mode).toUpperCase())
+    ? String(mode).toUpperCase()
+    : "FULL";
+  const db = getDb();
+  db.exec(`PRAGMA wal_checkpoint(${safeMode})`);
+}
+
+function closeDatabase() {
+  if (!connection && global.__DCP_SQLITE_CONNECTION) {
+    connection = global.__DCP_SQLITE_CONNECTION;
+  }
+  if (!connection) return;
+  checkpointDatabase("FULL");
+  if (typeof connection.close === "function") {
+    connection.close();
+  }
+  if (global.__DCP_SQLITE_CONNECTION === connection) {
+    delete global.__DCP_SQLITE_CONNECTION;
+  }
+  connection = null;
+}
+
 async function initDatabase() {
   ensureDatabaseDirectories();
   const hadExistingDatabase = fs.existsSync(databasePath) && fs.statSync(databasePath).size > 0;
@@ -115,7 +145,7 @@ async function initDatabase() {
   // that survived a previous unclean shutdown into the main database file,
   // ensuring the file on disk is always up-to-date before we accept requests.
   try {
-    db.exec("PRAGMA wal_checkpoint(FULL)");
+    checkpointDatabase("FULL");
   } catch (_err) {
     // Non-fatal — checkpoint failure at startup just means the WAL will be
     // merged during normal operation.
@@ -383,6 +413,8 @@ function seedAdminIfNeeded(db) {
 module.exports = {
   initDatabase,
   getDb,
+  checkpointDatabase,
+  closeDatabase,
   createDatabaseBackup,
   databasePath,
   backupDir,
