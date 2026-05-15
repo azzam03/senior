@@ -1313,20 +1313,3 @@ function toast(message, options = {}) {
     node._timer = setTimeout(() => node.classList.remove("show"), 4200);
   }
 }
-    close.type = "button";
-    close.setAttribute("aria-label", "Dismiss notification");
-    close.textContent = "x";
-    close.addEventListener("click", () => {
-      node.classList.remove("show");
-      node.dataset.locked = "false";
-      clearTimeout(node._timer);
-    });
-    node.append(close);
-  }
-
-  node.classList.add("show");
-  clearTimeout(node._timer);
-  if (!persistent) {
-    node._timer = setTimeout(() => node.classList.remove("show"), 4200);
-  }
-}
