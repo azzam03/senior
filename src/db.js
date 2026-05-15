@@ -10,12 +10,10 @@ const backup = typeof nodeSqlite.backup === "function" ? nodeSqlite.backup : nul
 
 const projectRoot = path.resolve(__dirname, "..");
 
-// On Render, use the persistent disk mounted at /var/data so the database
-// survives deploys and restarts.  Locally (and on any other host) fall back
-// to the project-local ./database directory.
-const databaseDir = process.env.RENDER
-  ? "/var/data/database"
-  : path.join(projectRoot, "database");
+// Store the database inside the project directory.  On Render free tier the
+// filesystem persists between spin-down / spin-up cycles (inactivity sleep),
+// so data survives as long as no new deploy is triggered.
+const databaseDir = path.join(projectRoot, "database");
 const backupDir = path.join(databaseDir, "backups");
 const databasePath = path.join(databaseDir, "app.db");
 
