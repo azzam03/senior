@@ -113,7 +113,14 @@ async function classifyWithOpenAI(records, contextPoints) {
 
   const payload = await response.json();
   const content = payload.choices?.[0]?.message?.content || "{}";
-  const parsed = JSON.parse(content);
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch (_parseError) {
+    // OpenAI occasionally returns malformed JSON even with response_format:json_object.
+    // Fall through gracefully — the per-record fallback below will handle missing items.
+    parsed = {};
+  }
   const items = Array.isArray(parsed.classifications) ? parsed.classifications : [];
   const map = new Map();
 
@@ -181,7 +188,7 @@ function buildPrompt(records, contextPoints) {
         "If TableName and ColumnName do not provide enough evidence for a direct Bahrain PDPL conclusion, do not return a generic no-signal reason. Use a conservative enterprise data-classification heuristic and explain that the reason is business-sensitivity based.",
         "Avoid Public for internal identifiers, employee/customer/user references, operational records, credentials, HR/payroll data, banking data, audit data, and confidential business-only records.",
         "confidentiality must be one of Public, Confidential, Secret, Top Secret.",
-        "personalData must be Yes or No.",
+        "personalData must be Yes or No. Location data (latitude, longitude, GPS) and device identifiers (IP address, MAC address, device_id, session_id) are personal data under Bahrain PDPL as they can identify individuals.",
         "confidenceScore must be a number from 0 to 1.",
         "policyRecommendation should use concise Bahrain PDPL governance language such as lawful basis review, consent required, masking recommended, restricted access, retention needed, transfer review needed, or no action.",
       ],
@@ -236,11 +243,15 @@ function localClassification(tableName, columnName, contextPoints = []) {
   const personName = /(^|_)(name|first_name|last_name|full_name|arabic_name|english_name)($|_)/i.test(column);
   const health = /(health|medical|diagnosis|patient|clinic|hospital|disability|biometric|genetic)/i.test(combined);
   const demographics = /(birth|dob|age|gender|nationality|marital|religion)/i.test(combined);
+  const location = /(latitude|longitude|gps|geoloc|geo_|location|coordinates?)/i.test(combined);
+  const deviceIdentifier = /(ip[_-]?addr|mac[_-]?addr|device[_-]?id|hardware[_-]?id|imei|imsi|cookie[_-]?id|session[_-]?id)/i.test(column);
   const subjectTable = /(employee|staff|customer|client|citizen|student|patient|beneficiary|user|person|applicant|driver|owner|vendor|supplier)/i.test(table);
   const subjectIdentifier = /(^|_)(employee|staff|customer|client|user|person|account|applicant|student|patient|owner|driver|vendor|supplier)?_?id$|(^|_)(employee|staff|customer|client|user|person|applicant|student|patient|owner|driver|vendor|supplier)_?(number|code|ref|reference)$/i.test(column);
   const username = /(username|login|user_name|screen_name)/i.test(column);
   const operational = /(audit|event|log|transaction|order|case|ticket|workflow|approval|payment|invoice|contract|asset|inventory|integration|interface)/i.test(combined);
   const internalOnly = /(internal|private|admin|security|permission|role|access|config|configuration|setting|rule|policy)/i.test(combined);
+  // A pure reference / lookup table (e.g. country_code, status_type) is Public by default.
+  // Crucially, subjectTable names like "customer_lookup" must NOT inherit personalData from this.
   const publicReference = /(lookup|reference|country|currency|status|type|category|public|catalog)/i.test(table) && /(code|name|description|status|type|category)/i.test(column);
 
   let confidentiality = publicReference ? "Public" : "Confidential";
@@ -266,7 +277,7 @@ function localClassification(tableName, columnName, contextPoints = []) {
     reason = "The metadata indicates identity, financial, or health-related data that requires stronger confidentiality controls under Bahrain PDPL governance expectations.";
     confidenceScore = 0.9;
     policyRecommendation = "restricted access; masking recommended; retention needed; lawful basis review";
-  } else if (contact || personName || demographics || subjectTable || subjectIdentifier || username) {
+  } else if (contact || personName || demographics || location || deviceIdentifier || subjectTable || subjectIdentifier || username) {
     confidentiality = "Confidential";
     reason = "The metadata indicates a person-related identifier or attribute; Bahrain PDPL concepts require controlled processing, purpose discipline, and access safeguards.";
     confidenceScore = 0.84;
@@ -278,19 +289,25 @@ function localClassification(tableName, columnName, contextPoints = []) {
     policyRecommendation = "restricted internal access; retention needed";
   }
 
-  if (identity || contact || personName || health || demographics || subjectTable || subjectIdentifier || username) {
+  // personal data check — publicReference tables (e.g. country_lookup.country_code) are never
+  // personal data even if the table name contains a subject word like "customer".
+  if (!publicReference && (identity || contact || personName || health || demographics || location || deviceIdentifier || (financial && subjectTable) || subjectTable || subjectIdentifier || username)) {
     personalData = "Yes";
     personalReason = "TableName and ColumnName indicate information that can identify, single out, or describe an individual, making it personal data under Bahrain PDPL concepts.";
     pseudonymizable = "Yes";
     anonymizable = "Yes";
     confidenceScore = Math.max(confidenceScore, 0.86);
-    if (identity) personalDataType = "Government Identifier";
-    else if (contact) personalDataType = "Contact Information";
-    else if (personName) personalDataType = "Name";
-    else if (health) personalDataType = "Health Data";
-    else if (demographics) personalDataType = "Demographic Attribute";
+    // Priority order: most sensitive / specific category first
+    if (identity)                   personalDataType = "Government Identifier";
+    else if (health)                personalDataType = "Health Data";
+    else if (financial && subjectTable) personalDataType = "Financial Data";
+    else if (contact)               personalDataType = "Contact Information";
+    else if (personName)            personalDataType = "Name";
+    else if (demographics)          personalDataType = "Demographic Attribute";
+    else if (location)              personalDataType = "Location Data";
+    else if (deviceIdentifier)      personalDataType = "Device / Network Identifier";
     else if (subjectIdentifier || username) personalDataType = "Identifier";
-    else personalDataType = "Individual Reference";
+    else                            personalDataType = "Individual Reference";
   }
 
   if (health || /(religion|biometric|genetic|disability)/i.test(combined)) {
@@ -328,7 +345,7 @@ function normalizeClassification(input) {
     pseudonymizable: yesNo(input.pseudonymizable, "No"),
     anonymizable: yesNo(input.anonymizable, "Yes"),
     specialCategory: yesNo(input.specialCategory, "No"),
-    confidenceScore: Math.max(0, Math.min(1, Number(input.confidenceScore || 0.75))),
+    confidenceScore: Math.max(0, Math.min(1, Number(input.confidenceScore != null ? input.confidenceScore : 0.75))),
     policyRecommendation: String(input.policyRecommendation || "review needed").slice(0, 500),
     source: input.source || "AI",
   };

@@ -204,6 +204,7 @@ button:disabled {
 .topbar h2 {
   margin: 0;
   color: var(--ink);
+  letter-spacing: -0.02em;
 }
 
 .auth-card-header p:not(.eyebrow),
@@ -342,7 +343,7 @@ textarea {
 .btn,
 .review-toggle,
 .icon-button {
-  min-height: 38px;
+  min-height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -356,7 +357,7 @@ textarea {
 
 .btn {
   border: 1px solid transparent;
-  padding: 9px 14px;
+  padding: 10px 16px;
 }
 
 .btn:hover,
@@ -508,7 +509,18 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  gap: 16px;
+}
+
+/* Modal actions: both buttons anchor to the right */
+.modal-actions {
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* Back button — give it breathing room before the hero section */
+#backToDashboard {
+  margin-bottom: 14px;
 }
 
 .topbar {
@@ -551,7 +563,7 @@ textarea {
 }
 
 .page-heading {
-  margin-bottom: 18px;
+  margin-bottom: 24px;
 }
 
 .stats-grid,
@@ -630,11 +642,11 @@ textarea {
 }
 
 .section-header {
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 
 .section-header.compact {
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .systems-grid {
@@ -661,8 +673,9 @@ textarea {
 }
 
 .system-card h3 {
-  margin: 8px 0 0;
+  margin: 4px 0 0;
   color: var(--ink);
+  letter-spacing: -0.01em;
 }
 
 .system-card-meta {
@@ -841,7 +854,7 @@ progress::-moz-progress-bar {
 .system-hero {
   position: relative;
   overflow: hidden;
-  margin: 16px 0;
+  margin: 0 0 20px;
   padding: 22px;
   background: #ffffff;
   border: 1px solid var(--line);
@@ -874,8 +887,8 @@ progress::-moz-progress-bar {
 
 .tabs {
   margin-bottom: 20px;
-  gap: 8px;
-  padding: 7px;
+  gap: 4px;
+  padding: 5px;
   background: #ffffff;
   box-shadow: var(--shadow-sm);
   overflow-x: auto;
@@ -1207,8 +1220,8 @@ progress::-moz-progress-bar {
 
 .upload-panel {
   grid-template-columns: minmax(220px, 1fr) auto;
-  align-items: end;
-  padding: 15px;
+  align-items: center;
+  padding: 16px;
   background: var(--surface-muted);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1219,8 +1232,14 @@ progress::-moz-progress-bar {
 }
 
 .classification-panel {
-  margin: 14px 0;
-  padding: 15px;
+  /* Override the shared flex rule — use grid so progress takes its own full row */
+  display: grid !important;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 12px 20px;
+  align-items: center;
+  margin: 16px 0;
+  padding: 18px;
   background: #ffffff;
   border: 1px solid var(--line);
   border-left: 4px solid var(--teal);
@@ -1236,11 +1255,13 @@ progress::-moz-progress-bar {
 .classification-panel > div {
   display: grid;
   gap: 4px;
-  min-width: 220px;
+  min-width: 200px;
 }
 
-.classification-panel progress {
-  max-width: 440px;
+/* Progress bar always spans both columns */
+.classification-panel > progress {
+  grid-column: 1 / -1;
+  max-width: none;
 }
 
 .classification-file-block strong {
@@ -1262,15 +1283,15 @@ progress::-moz-progress-bar {
 }
 
 .table-toolbar {
-  align-items: flex-start;
+  align-items: center;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .toolbar-group {
   display: flex;
   flex-wrap: wrap;
-  align-items: end;
+  align-items: center;
   gap: 8px;
 }
 
@@ -1339,10 +1360,10 @@ progress::-moz-progress-bar {
 }
 
 .actions-menu summary.btn::after {
-  content: "v";
+  content: "▾";
   color: var(--muted);
-  font-size: 0.78rem;
-  margin-left: 18px;
+  font-size: 0.82rem;
+  margin-left: 10px;
 }
 
 .actions-menu[open] summary.btn {
