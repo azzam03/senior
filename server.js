@@ -1625,12 +1625,19 @@ app.get("/api/systems/:id/export", requireAuth, requireSystemAccess, async (req,
     const db = getDb();
     const rows = db.prepare("SELECT * FROM data_records WHERE systemId = ? ORDER BY rowIndex ASC").all(req.system.id).map(recordToApi);
     const pdpl = db.prepare("SELECT * FROM pdpl_notes WHERE systemId = ?").get(req.system.id);
+    const contextPoints = db
+      .prepare("SELECT tag, content, createdBy, createdAt, updatedAt FROM context_points WHERE systemId = ? ORDER BY createdAt ASC")
+      .all(req.system.id);
+    // The export endpoint deliberately returns exactly ONE artifact: a single .xlsx workbook
+    // containing the five required sheets (Overall, System Data, Personal Data,
+    // System Context, PDPL). No ZIP, CSV, PDF, JSON, or any other file is produced.
     const workbook = await buildSystemDataExport({
       system: req.system,
       rows,
       originalColumns: getOriginalColumns(req.system.id),
       summary: getSystemSummary(req.system.id),
       pdpl,
+      contextPoints,
     });
 
     const fileName = exportFileName(req.system.name);

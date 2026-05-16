@@ -102,12 +102,13 @@ function findColumn(columns, expected) {
   return columns.find((column) => String(column).toLowerCase().replace(/[^a-z0-9]/g, "") === target);
 }
 
-async function buildSystemDataExport({ system, rows, originalColumns, summary, pdpl }) {
+async function buildSystemDataExport({ system, rows, originalColumns, summary, pdpl, contextPoints }) {
   const safeSystem = normalizeSystem(system);
   const safeRows = Array.isArray(rows) ? rows : [];
   const safeColumns = normalizeOriginalColumns(originalColumns, safeRows);
   const safeSummary = normalizeSummary(summary);
   const safePdpl = normalizePdpl(pdpl);
+  const safeContextPoints = normalizeContextPoints(contextPoints);
   const personalRows = safeRows.filter(isPersonalDataRecord);
   const approvedPersonalRows = personalRows.filter(isApprovedPersonalRecord);
 
@@ -115,12 +116,32 @@ async function buildSystemDataExport({ system, rows, originalColumns, summary, p
   workbook.creator = "DATA CLASSIFICATION & GOVERNANCE PLATFORM";
   workbook.created = new Date();
 
+  // The workbook MUST contain exactly these five sheets in this order:
+  //   1. Overall
+  //   2. System Data
+  //   3. Personal Data
+  //   4. System Context
+  //   5. PDPL
   buildOverallSheet(workbook, { system: safeSystem, summary: safeSummary, pdpl: safePdpl });
   buildDataSheet(workbook, "System Data", safeRows, safeColumns, false);
   buildDataSheet(workbook, "Personal Data", personalRows, safeColumns, true);
+  buildSystemContextSheet(workbook, { system: safeSystem, contextPoints: safeContextPoints });
   buildPdplSheet(workbook, { system: safeSystem, rows: approvedPersonalRows, pdpl: safePdpl });
 
   return workbook;
+}
+
+function normalizeContextPoints(contextPoints) {
+  if (!Array.isArray(contextPoints)) return [];
+  return contextPoints
+    .map((point) => ({
+      tag: String(point?.tag || "").trim(),
+      content: String(point?.content || "").trim(),
+      createdBy: String(point?.createdBy || "").trim(),
+      createdAt: String(point?.createdAt || "").trim(),
+      updatedAt: String(point?.updatedAt || "").trim(),
+    }))
+    .filter((point) => point.tag || point.content);
 }
 
 function normalizeSystem(system = {}) {
@@ -467,74 +488,37 @@ function buildDataSheet(workbook, name, rows, originalColumns, personalOnly) {
   };
 }
 
-function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links }) {
-  const sheet = workbook.addWorksheet("Links & General Info", {
-    views: [{ showGridLines: false }],
+// NOTE: The "Links & General Info" sheet (which previously produced a second deliverable in
+// the export flow) has been removed. The export now produces exactly one .xlsx workbook with
+// five sheets: Overall, System Data, Personal Data, System Context, PDPL.
+
+function buildSystemContextSheet(workbook, { system, contextPoints }) {
+  const sheet = workbook.addWorksheet("System Context", {
+    views: [{ state: "frozen", ySplit: 6, showGridLines: false }],
   });
   sheet.columns = [
     { width: 28 },
-    { width: 34 },
+    { width: 60 },
     { width: 24 },
-    { width: 48 },
-    { width: 22 },
-    { width: 28 },
+    { width: 24 },
   ];
 
-  sheet.mergeCells("A1:F1");
-  sheet.getCell("A1").value = `${system.name} - Links and General Information`;
+  sheet.mergeCells("A1:D1");
+  sheet.getCell("A1").value = `${system.name} - System Context`;
   sheet.getCell("A1").font = { bold: true, size: 16, color: { argb: "FFFFFFFF" } };
   sheet.getCell("A1").fill = fill("0F766E");
   sheet.getCell("A1").alignment = { vertical: "middle" };
   sheet.getRow(1).height = 30;
 
-  addSectionHeader(sheet, 3, "System Information");
-  addSummaryTable(sheet, 4, [
-    ["Field", "Value"],
-    ["System Name", system.name],
-    ["Responsible Owner", system.owner],
-    ["DBA", system.dba],
-    ["Owner Email", system.ownerEmail],
-    ["System Group", system.systemGroup],
-    ["Assigned Consultant", system.assignedConsultant || ""],
-    ["Source System Reference", system.sourceSystemRef || ""],
-    ["Target System Reference", system.targetSystemRef || ""],
-    ["Related System Links", system.relatedSystemLinks || ""],
-    ["Uploaded File", system.lastUploadFileName || "No file uploaded"],
-    ["Status", system.status],
-  ]);
+  sheet.mergeCells("A3:D3");
+  sheet.getCell("A3").value =
+    "Reviewer-supplied context describing the system's purpose and data scope. The classifier uses these notes as supporting evidence, but they must not, on their own, push every field into Personal Data or Secret.";
+  sheet.getCell("A3").alignment = { vertical: "middle", wrapText: true };
+  sheet.getCell("A3").font = { color: { argb: "FF374151" }, italic: true };
+  sheet.getRow(3).height = 36;
 
-  addSectionHeader(sheet, 18, "Classification Totals");
-  addSummaryTable(sheet, 19, [
-    ["Metric", "Value"],
-    ["Total Records", summary.totalRecords],
-    ["Fully Classified", summary.classified],
-    ["Pending Classification", summary.pending],
-    ["Personal Data Records", summary.personal],
-    ["Review Queue", summary.reviewQueue],
-    ["Low Confidence", summary.lowConfidence],
-    ["Tables With Personal Data", summary.tablesWithPersonalData],
-  ]);
-
-  const personalTypeRows = personalDataTypeRows(summary);
-  const personalTypesStart = 29;
-  addSectionHeader(sheet, personalTypesStart, "Personal Data Type Counts");
-  addSummaryTable(sheet, personalTypesStart + 1, personalTypeRows);
-
-  const pdplStart = personalTypesStart + personalTypeRows.length + 3;
-  const pdplRows = [
-    ["Indicator", "Status"],
-    ["Data Subject Rights Coverage", pdpl?.dataSubjectRightsCoverage || "Needs Review"],
-    ["Consent Tracking Status", pdpl?.consentTrackingStatus || "Needs Review"],
-    ["Cross-Border Transfer Flags", pdpl?.crossBorderTransferFlags || "No Flags Recorded"],
-    ["Governance Notes", pdpl?.governanceNotes || ""],
-  ];
-  addSectionHeader(sheet, pdplStart, "PDPL General Notes");
-  addSummaryTable(sheet, pdplStart + 1, pdplRows);
-
-  const linksStart = pdplStart + pdplRows.length + 3;
-  addSectionHeader(sheet, linksStart, "Reference Links");
-  const headerRowNumber = linksStart + 1;
-  const headers = ["Title", "URL", "Category", "Description", "Created By", "Updated At"];
+  const headerRowNumber = 6;
+  const headers = ["Context Tag", "Content", "Recorded By", "Last Updated"];
   sheet.getRow(headerRowNumber).values = headers;
   sheet.getRow(headerRowNumber).height = 24;
   sheet.getRow(headerRowNumber).eachCell((cell) => {
@@ -544,41 +528,43 @@ function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links 
     cell.alignment = { vertical: "middle", horizontal: "center" };
   });
 
-  if (links.length) {
-    links.forEach((link) => {
-      const url = String(link.url || "");
+  if (contextPoints.length) {
+    contextPoints.forEach((point) => {
       const added = sheet.addRow([
-        link.title || "",
-        url,               // populated but overridden below with a real hyperlink
-        link.category || "",
-        link.description || "",
-        link.createdBy || "",
-        link.updatedAt || "",
+        point.tag || "Context",
+        point.content || "",
+        point.createdBy || "",
+        point.updatedAt || point.createdAt || "",
       ]);
+      if (added.number % 2 === 0) {
+        added.eachCell((cell) => {
+          cell.fill = fill("F8FAFC");
+        });
+      }
       added.eachCell((cell) => {
         cell.border = border("E2E8F0");
         cell.alignment = { vertical: "top", wrapText: true };
       });
-      // Make the URL cell a proper clickable hyperlink in Excel.
-      if (url) {
-        const urlCell = added.getCell(2);
-        urlCell.value = { text: url, hyperlink: url };
-        urlCell.font = { color: { argb: "FF1D4ED8" }, underline: true };
-      }
+      added.getCell(1).font = { bold: true, color: { argb: "FF1D4ED8" } };
     });
   } else {
-    const added = sheet.addRow(["No links stored", "", "", "", "", ""]);
+    const added = sheet.addRow([
+      "No context recorded",
+      "No reviewer-supplied system context has been added for this system yet.",
+      "",
+      "",
+    ]);
     added.eachCell((cell) => {
       cell.border = border("E2E8F0");
       cell.alignment = { vertical: "top", wrapText: true };
+      cell.font = { italic: true, color: { argb: "FF6B7280" } };
     });
   }
 
   sheet.autoFilter = {
     from: `A${headerRowNumber}`,
-    to: `F${headerRowNumber}`,
+    to: `D${headerRowNumber}`,
   };
-  applyOuterBorders(sheet, `A1:F${Math.max(headerRowNumber + Math.max(links.length, 1), headerRowNumber)}`);
 }
 
 function buildPdplSheet(workbook, { system, rows, pdpl }) {

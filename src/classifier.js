@@ -118,8 +118,6 @@ async function classifyWithOpenAI(records, contextPoints) {
   try {
     parsed = JSON.parse(content);
   } catch (_parseError) {
-    // OpenAI occasionally returns malformed JSON even with response_format:json_object.
-    // Fall through gracefully — the per-record fallback below will handle missing items.
     parsed = {};
   }
   const items = Array.isArray(parsed.classifications) ? parsed.classifications : [];
@@ -191,8 +189,14 @@ function buildPrompt(records, contextPoints) {
         "Do not mark Personal Data = Yes only because the columnName is generic, including Name, Description, Code, Status, Type, Value, CreatedDate, UpdatedDate, CreatedBy, UpdatedBy, or Id.",
         "Technical tables such as HangFire, JobParameter, BackgroundJobs, Settings, Configuration, Lookup, Status, Logs, AuditLogs, and system parameter tables must not be automatically marked as personal data.",
         "JobParameter.Name should normally be Personal Data = No because it is a technical job parameter name, not a person's name.",
+        "Pure system fields such as created_at, updated_at, status, log_id, service_name, error_code, request_id, trace_id, batch_id, version, timestamp, event_type are System Data — Personal Data = No and confidentiality must not be Secret.",
+        "user_id, customer_id, employee_id are Personal Data only when the surrounding table clearly represents a person (users, customers, employees, applicants). In a technical/log/audit table the same id is treated as System Data.",
+        "session_id and cookie_id default to System Data; classify them as Personal Data only when the surrounding table is a subject table (users, customers, sessions linked to users) or context indicates user-tracking risk.",
+        "ip_address is Personal Data only when used to identify or track a user (e.g., users.last_ip); generic technical request logs may keep it as System Data.",
+        "Generic attribute fields such as department, role, status, category, type, kind, severity must not automatically become Personal Data or Secret.",
         "Clearly personal fields such as Email, PhoneNumber, MobileNumber, NationalId, UserName, FullName, Address, ApplicantName, OwnerName, ContactNumber, or DateOfBirth should be Personal Data = Yes.",
-        "Use Secret only when there is strong metadata evidence of highly sensitive data such as national ID, password, token, financial account data, authentication secrets, health data, or legal/regulatory sensitive identifiers.",
+        "Use Secret only when there is strong metadata evidence of highly sensitive data such as national ID, password, API key, access token, refresh token, private key, authorization header, financial account data, authentication secrets, health data, or legal/regulatory sensitive identifiers.",
+        "Do not classify a field as Secret just because it contains the word 'token' or 'key'. Examples of Secret: password, api_key, access_token, refresh_token, private_key, authorization_header, encryption_key, client_secret, security_answer.",
         "Business or operational fields may be Confidential, but do not automatically make them Secret.",
         "If TableName and ColumnName are unclear, explain the uncertainty and keep the item reviewable by a human instead of over-classifying it.",
         "Avoid Public for clear internal operational records, credentials, HR/payroll data, banking data, audit data, and confidential business-only records.",
@@ -239,111 +243,10 @@ function classifyWithLocalRules(records, contextPoints) {
   return map;
 }
 
-function legacyLocalClassification(tableName, columnName, contextPoints = []) {
-  const table = String(tableName || "").toLowerCase();
-  const column = String(columnName || "").toLowerCase();
-  const context = contextPoints.map((point) => `${point.tag} ${point.content}`).join(" ").toLowerCase();
-  const combined = `${table} ${column} ${context}`;
-
-  const highRisk = /(password|passwd|token|secret|private[_-]?key|api[_-]?key|credential|hash)/i.test(column);
-  const financial = /(salary|iban|bank|account|card|payment|balance|income|tax|invoice)/i.test(combined);
-  const identity = /(national|iqama|passport|license|ssn|nid|id_number|identity|civil)/i.test(combined);
-  const contact = /(email|phone|mobile|address|contact)/i.test(column);
-  const personName = /(^|_)(name|first_name|last_name|full_name|arabic_name|english_name)($|_)/i.test(column);
-  const health = /(health|medical|diagnosis|patient|clinic|hospital|disability|biometric|genetic)/i.test(combined);
-  const demographics = /(birth|dob|age|gender|nationality|marital|religion)/i.test(combined);
-  const location = /(latitude|longitude|gps|geoloc|geo_|location|coordinates?)/i.test(combined);
-  const deviceIdentifier = /(ip[_-]?addr|mac[_-]?addr|device[_-]?id|hardware[_-]?id|imei|imsi|cookie[_-]?id|session[_-]?id)/i.test(column);
-  const subjectTable = /(employee|staff|customer|client|citizen|student|patient|beneficiary|user|person|applicant|driver|owner|vendor|supplier)/i.test(table);
-  const subjectIdentifier = /(^|_)(employee|staff|customer|client|user|person|account|applicant|student|patient|owner|driver|vendor|supplier)?_?id$|(^|_)(employee|staff|customer|client|user|person|applicant|student|patient|owner|driver|vendor|supplier)_?(number|code|ref|reference)$/i.test(column);
-  const username = /(username|login|user_name|screen_name)/i.test(column);
-  const operational = /(audit|event|log|transaction|order|case|ticket|workflow|approval|payment|invoice|contract|asset|inventory|integration|interface)/i.test(combined);
-  const internalOnly = /(internal|private|admin|security|permission|role|access|config|configuration|setting|rule|policy)/i.test(combined);
-  // A pure reference / lookup table (e.g. country_code, status_type) is Public by default.
-  // Crucially, subjectTable names like "customer_lookup" must NOT inherit personalData from this.
-  const publicReference = /(lookup|reference|country|currency|status|type|category|public|catalog)/i.test(table) && /(code|name|description|status|type|category)/i.test(column);
-
-  let confidentiality = publicReference ? "Public" : "Confidential";
-  let reason = publicReference
-    ? "Reference metadata appears suitable for Public handling only because TableName and ColumnName do not identify an individual or internal-sensitive process."
-    : "Business metadata indicates an internal operational field; although direct Bahrain PDPL evidence is limited, conservative governance treats it as Confidential rather than public.";
-  let personalData = "No";
-  let personalReason = "TableName and ColumnName do not point to an identifiable individual, so Bahrain PDPL personal-data obligations are not triggered for this field based on available metadata.";
-  let personalDataType = "";
-  let pseudonymizable = "No";
-  let anonymizable = "Yes";
-  let specialCategory = "No";
-  let confidenceScore = 0.78;
-  let policyRecommendation = "no action";
-
-  if (highRisk) {
-    confidentiality = "Top Secret";
-    reason = "Credential or secret material requires strict access restriction and security safeguards aligned with Bahrain PDPL accountability expectations.";
-    confidenceScore = 0.96;
-    policyRecommendation = "restricted access; masking recommended; lawful basis review";
-  } else if (identity || health || financial) {
-    confidentiality = "Secret";
-    reason = "The metadata indicates identity, financial, or health-related data that requires stronger confidentiality controls under Bahrain PDPL governance expectations.";
-    confidenceScore = 0.9;
-    policyRecommendation = "restricted access; masking recommended; retention needed; lawful basis review";
-  } else if (contact || personName || demographics || location || deviceIdentifier || subjectTable || subjectIdentifier || username) {
-    confidentiality = "Confidential";
-    reason = "The metadata indicates a person-related identifier or attribute; Bahrain PDPL concepts require controlled processing, purpose discipline, and access safeguards.";
-    confidenceScore = 0.84;
-    policyRecommendation = "masking recommended; consent or lawful basis review; retention needed";
-  } else if (operational || internalOnly) {
-    confidentiality = "Confidential";
-    reason = "The field appears operational or internal business data; even where direct Bahrain PDPL personal-data evidence is limited, enterprise governance should restrict it from public exposure.";
-    confidenceScore = 0.8;
-    policyRecommendation = "restricted internal access; retention needed";
-  }
-
-  // personal data check — publicReference tables (e.g. country_lookup.country_code) are never
-  // personal data even if the table name contains a subject word like "customer".
-  if (!publicReference && (identity || contact || personName || health || demographics || location || deviceIdentifier || (financial && subjectTable) || subjectTable || subjectIdentifier || username)) {
-    personalData = "Yes";
-    personalReason = "TableName and ColumnName indicate information that can identify, single out, or describe an individual, making it personal data under Bahrain PDPL concepts.";
-    pseudonymizable = "Yes";
-    anonymizable = "Yes";
-    confidenceScore = Math.max(confidenceScore, 0.86);
-    // Priority order: most sensitive / specific category first
-    if (identity)                   personalDataType = "Government Identifier";
-    else if (health)                personalDataType = "Health Data";
-    else if (financial && subjectTable) personalDataType = "Financial Data";
-    else if (contact)               personalDataType = "Contact Information";
-    else if (personName)            personalDataType = "Name";
-    else if (demographics)          personalDataType = "Demographic Attribute";
-    else if (location)              personalDataType = "Location Data";
-    else if (deviceIdentifier)      personalDataType = "Device / Network Identifier";
-    else if (subjectIdentifier || username) personalDataType = "Identifier";
-    else                            personalDataType = "Individual Reference";
-  }
-
-  if (health || /(religion|biometric|genetic|disability)/i.test(combined)) {
-    specialCategory = "Yes";
-    confidentiality = confidentiality === "Top Secret" ? "Top Secret" : "Secret";
-    policyRecommendation = "restricted access; explicit consent or lawful basis review; enhanced safeguards";
-    confidenceScore = Math.max(confidenceScore, 0.92);
-  }
-
-  return normalizeClassification({
-    confidentiality,
-    reason,
-    personalData,
-    personalReason,
-    personalDataType,
-    pseudonymizable,
-    anonymizable,
-    specialCategory,
-    confidenceScore,
-    policyRecommendation,
-    source: OPENAI_API_KEY ? "local fallback" : "local AI rules",
-  });
-}
-
 function localClassification(tableName, columnName, contextPoints = []) {
   const signal = analyzeMetadata(tableName, columnName);
   const hasContext = Array.isArray(contextPoints) && contextPoints.length > 0;
+  const evidence = [];
 
   let confidentiality = signal.publicReference ? "Public" : "Confidential";
   let reason = signal.publicReference
@@ -360,34 +263,48 @@ function localClassification(tableName, columnName, contextPoints = []) {
   let confidenceScore = signal.genericColumn || signal.technicalTable ? 0.68 : 0.74;
   let policyRecommendation = hasContext ? "review needed; confirm with system owner" : "review needed";
 
-  if (signal.technicalTable && !signal.strongSensitive && !signal.strongPersonal) {
+  // Priority 1: Pure technical/system fields -> System Data.
+  if (signal.pureSystemField && !signal.highRiskSecret && !signal.secretSensitive) {
+    confidentiality = signal.publicReference ? "Public" : "Confidential";
+    reason = "Field name indicates purely technical/operational metadata (timestamp, log, status, service, event, or trace identifier) - System Data, not Personal Data or Secret.";
+    policyRecommendation = "technical metadata review";
+    confidenceScore = Math.max(confidenceScore, 0.82);
+    evidence.push("pure-system-field");
+  } else if (signal.technicalTable && !signal.strongSensitive && !signal.strongPersonal) {
     confidentiality = signal.publicReference ? "Public" : "Confidential";
     reason = "This appears to be technical or system metadata; do not infer Secret or personal-data handling without a specific sensitive column signal.";
     policyRecommendation = "technical metadata review";
+    evidence.push("technical-table");
   }
 
+  // Priority 2: Credentials / secrets -> Secret / Top Secret.
   if (signal.highRiskSecret) {
     confidentiality = "Top Secret";
-    reason = "Column metadata indicates authentication secrets or credentials that require strict restricted access and masking.";
+    reason = "Column metadata indicates authentication secrets or credentials (password, API key, access/refresh token, private key, authorization header, etc.) - requires strict restricted access and masking.";
     confidenceScore = 0.96;
     policyRecommendation = "restricted access; masking recommended; enhanced safeguards";
+    evidence.push("credential-or-secret");
   } else if (signal.secretSensitive) {
     confidentiality = "Secret";
     reason = "Column metadata indicates a highly sensitive identifier, financial account, health, or regulated sensitive category requiring stronger controls.";
     confidenceScore = 0.91;
     policyRecommendation = "restricted access; masking recommended; lawful basis review; retention needed";
+    evidence.push("sensitive-identifier-or-financial-or-health");
   } else if (signal.strongPersonal || signal.subjectSpecificIdentifier || signal.personalFinancial || signal.demographicPersonal) {
     confidentiality = "Confidential";
     reason = "TableName and ColumnName indicate person-related metadata that should be protected with controlled access and governance review.";
     confidenceScore = Math.max(confidenceScore, 0.84);
     policyRecommendation = "masking recommended; lawful basis review; retention needed";
+    evidence.push("person-related");
   } else if (signal.operational || signal.internalOnly) {
     confidentiality = "Confidential";
     reason = "The field appears operational or internal business metadata; restrict from public exposure, but do not escalate to Secret without stronger evidence.";
     confidenceScore = Math.max(confidenceScore, 0.76);
     policyRecommendation = "restricted internal access; retention needed";
+    evidence.push("operational-or-internal");
   }
 
+  // Priority 3: Personal Data only with clear evidence (analyzeMetadata already gates).
   if (signal.personalData) {
     personalData = "Yes";
     personalReason = "TableName and ColumnName together indicate information that can identify, contact, describe, or relate to a natural person under Bahrain PDPL concepts.";
@@ -395,6 +312,7 @@ function localClassification(tableName, columnName, contextPoints = []) {
     anonymizable = "Yes";
     confidenceScore = Math.max(confidenceScore, 0.86);
     personalDataType = signal.personalDataType;
+    evidence.push(`personal-data:${signal.personalDataType || "Identifier"}`);
   }
 
   if (signal.specialCategory) {
@@ -402,6 +320,24 @@ function localClassification(tableName, columnName, contextPoints = []) {
     confidentiality = confidentiality === "Top Secret" ? "Top Secret" : "Secret";
     policyRecommendation = "restricted access; explicit consent or lawful basis review; enhanced safeguards";
     confidenceScore = Math.max(confidenceScore, 0.92);
+    evidence.push("special-category");
+  }
+
+  // Confidence-based safety net.
+  const lowConfidence = confidenceScore < 0.7;
+  if (lowConfidence && !signal.highRiskSecret && !signal.secretSensitive) {
+    if (["Secret", "Top Secret"].includes(confidentiality)) {
+      confidentiality = "Confidential";
+      reason = "Evidence for a sensitive classification was weak; downgraded to Confidential pending reviewer confirmation.";
+      evidence.push("low-confidence-downgrade-from-secret");
+    }
+    if (personalData === "Yes" && !signal.strongPersonal) {
+      personalData = "No";
+      personalReason = "Personal-data evidence is weak; treat as System Data until a reviewer confirms the field identifies a natural person.";
+      personalDataType = "";
+      pseudonymizable = "No";
+      evidence.push("low-confidence-downgrade-from-personal");
+    }
   }
 
   return normalizeClassification({
@@ -415,6 +351,7 @@ function localClassification(tableName, columnName, contextPoints = []) {
     specialCategory,
     confidenceScore,
     policyRecommendation,
+    evidence,
     source: OPENAI_API_KEY ? "local fallback" : "local AI rules",
   });
 }
@@ -427,36 +364,61 @@ function analyzeMetadata(tableName, columnName) {
   const metadata = `${table} ${column}`;
   const compactMetadata = `${compactTable} ${compactColumn}`;
 
-  const technicalTable = /(hangfire|jobparameter|backgroundjob|backgroundjobs|setting|settings|configuration|config|lookup|status|log|logs|auditlog|auditlogs|systemparameter|systemparameters|parameter|parameters)/i.test(compactTable);
+  const technicalTable = /(hangfire|jobparameter|backgroundjob|backgroundjobs|setting|settings|configuration|config|lookup|log|logs|auditlog|auditlogs|systemparameter|systemparameters|parameter|parameters|trace|telemetry|metric|metrics|event|events|errorlog|errorlogs|servicelog|servicelogs|sessionlogs|requestlogs)/i.test(compactTable);
   const referenceTable = /(lookup|reference|status|type|category|catalog|currency|country)/i.test(compactTable);
   const genericColumn = isGenericColumn(compactColumn);
   const publicReference = referenceTable && genericColumn && !/(setting|configuration|config|parameter)/i.test(compactTable);
 
-  const highRiskSecret = /(password|passwd|token|secret|privatekey|apikey|credential|hash|salt|certificate|authkey)/i.test(compactColumn);
-  const governmentId = /(nationalid|nationalnumber|civilid|iqama|passport|ssn|nid|identitynumber|idnumber|licenseid|licensenumber)/i.test(compactColumn);
-  const financialAccount = /(iban|bankaccount|accountnumber|cardnumber|creditcard|debitcard|paymentaccount|swiftcode)/i.test(compactColumn);
-  const health = /(health|medical|diagnosis|patient|clinic|hospital|disability|biometric|genetic)/i.test(compactMetadata);
-  const specialCategory = /(health|medical|diagnosis|patient|biometric|genetic|religion|criminal|disability)/i.test(compactMetadata);
+  // Pure system / technical fields - timestamps, log identifiers, status fields, request IDs.
+  const pureSystemField =
+    /^(createdat|updatedat|deletedat|modifiedat|insertedat|timestamp|datetime|date|time|createdon|updatedon)$/i.test(compactColumn) ||
+    /^(logid|eventid|eventtype|eventname|servicename|service|errorcode|statuscode|httpstatus|requestid|correlationid|traceid|spanid|batchid|jobid|sequencenumber|sequenceid|version|revision|tenantid|environment)$/i.test(compactColumn) ||
+    /^(status|state|type|category|kind|level|severity|priority|code|errormessage|message|description)$/i.test(compactColumn);
+
+  // Credentials / authentication secrets - strict anchored patterns.
+  const highRiskSecret =
+    /(password|passwd|passcode|pwd|privatekey|encryptionkey|signingkey|apikey|accesstoken|refreshtoken|sessiontoken|bearertoken|bearer|authtoken|authkey|authorizationheader|authheader|oauthtoken|clientsecret|securityanswer|securityquestion|recoveryanswer|recoverycode|otpsecret|mfasecret|salt|saltvalue|passwordhash|hashedpassword|credentials?|tokenhash)/i.test(compactColumn) ||
+    /(certificate|publickey|sshkey|pgpkey)/i.test(compactColumn);
+
+  // Long, unambiguous patterns matched against the compacted column name.
+  // Short ambiguous tokens (passport, ssn, nid, dob) are matched only as whole
+  // words against the original column name to avoid false positives like "session_id"
+  // matching "nid" or "session" matching "ssn".
+  const governmentId =
+    /(nationalidnumber|nationalnumber|nationalid|civilidnumber|civilnumber|civilid|passportnumber|passportno|identitynumber|idnumber|licensenumber|drivinglicensenumber|drivinglicense|residencynumber|residencyid|iqamanumber|iqama)/i.test(compactColumn) ||
+    /\b(passport|ssn|nid|dob)\b/i.test(column);
+  const financialAccount = /(iban|bankaccount|accountnumber|cardnumber|creditcard|debitcard|paymentaccount|swiftcode|routingnumber)/i.test(compactColumn);
+  const health = /(health|medical|diagnosis|patient|clinic|hospital|disability|biometric|genetic|prescription)/i.test(compactMetadata);
+  const specialCategory = /(health|medical|diagnosis|patient|biometric|genetic|religion|criminal|disability|ethnic|politicalopinion)/i.test(compactMetadata);
   const secretSensitive = governmentId || financialAccount || health;
 
-  const directContact = /(email|emailaddress|phonenumber|phone|mobile|mobilenumber|contactnumber|telephone|address|postaladdress)/i.test(compactColumn);
-  const directName = /(fullname|firstname|lastname|middlename|arabicname|englishname|applicantname|ownername|contactname|customername|employeename|username|loginname|screenname)/i.test(compactColumn);
-  const directBirthDate = /(dateofbirth|birthdate|dob)/i.test(compactColumn);
-  const locationIdentifier = /(latitude|longitude|gps|geolocation|coordinates|location)/i.test(compactColumn);
-  const deviceIdentifier = /(ipaddress|ipaddr|macaddress|macaddr|deviceid|hardwareid|imei|imsi|cookieid|sessionid)/i.test(compactColumn);
-  const strongPersonal = directContact || directName || directBirthDate || governmentId || locationIdentifier || deviceIdentifier;
+  const directContact = /(emailaddress|^email$|personalemail|workemail|phonenumber|^phone$|mobile|mobilenumber|contactnumber|telephone|^address$|homeaddress|postaladdress|mailingaddress|streetaddress)/i.test(compactColumn);
+  const directName = /(fullname|firstname|lastname|middlename|givenname|familyname|arabicname|englishname|applicantname|ownername|contactname|customername|employeename|personname|displayname|username|loginname|screenname)/i.test(compactColumn);
+  const directBirthDate = /(dateofbirth|birthdate|^dob$|birthday)/i.test(compactColumn);
+  const locationIdentifier = /(latitude|longitude|gps|geolocation|coordinates|homelocation|userlocation)/i.test(compactColumn);
 
-  const subjectTable = /(employee|staff|customer|client|citizen|student|patient|beneficiary|user|person|applicant|driver|owner|resident|member)/i.test(compactTable);
-  const subjectSpecificIdentifier = /(employee|staff|customer|client|citizen|student|patient|beneficiary|user|person|applicant|driver|owner|resident|member)(id|number|code|ref|reference)$/i.test(compactColumn);
-  const personalFinancial = subjectTable && /(salary|payroll|income|tax|compensation|allowance)/i.test(compactColumn);
-  const demographicPersonal = subjectTable && /(age|gender|nationality|maritalstatus|religion)/i.test(compactColumn);
+  const strongDeviceIdentifier = /(macaddress|macaddr|imei|imsi|hardwareid|deviceserial|advertisingid|androidid|idfa)/i.test(compactColumn);
+  const weakDeviceIdentifier = /(ipaddress|ipaddr|^ip$|cookieid|sessionid|deviceid)/i.test(compactColumn);
+
+  const strongPersonal = directContact || directName || directBirthDate || governmentId || locationIdentifier || strongDeviceIdentifier;
+
+  const subjectTable = /(employee|staff|customer|client|citizen|student|patient|beneficiary|user|person|applicant|driver|owner|resident|member|contact|profile|account|hr)/i.test(compactTable) && !technicalTable;
+  const subjectSpecificIdentifierColumn = /(employee|staff|customer|client|citizen|student|patient|beneficiary|user|person|applicant|driver|owner|resident|member)(id|number|code|ref|reference)$/i.test(compactColumn);
+  // Subject-id columns are Personal Data only in subject tables (not in technical/log/audit tables).
+  const subjectSpecificIdentifier = subjectSpecificIdentifierColumn && subjectTable;
+  const personalFinancial = subjectTable && /(salary|payroll|income|tax|compensation|allowance|bonus|wage)/i.test(compactColumn);
+  const demographicPersonal = subjectTable && /(age|gender|nationality|maritalstatus|religion|ethnicity)/i.test(compactColumn);
+
+  // Weak device identifiers only count as Personal Data when in a subject table.
+  const weakIdentifierAsPersonal = weakDeviceIdentifier && subjectTable;
 
   const genericTechnicalOnly = technicalTable && genericColumn && !strongPersonal && !secretSensitive && !highRiskSecret;
-  const personalData = !genericTechnicalOnly && (
+  const personalData = !genericTechnicalOnly && !pureSystemField && (
     strongPersonal ||
     subjectSpecificIdentifier ||
     personalFinancial ||
-    demographicPersonal
+    demographicPersonal ||
+    weakIdentifierAsPersonal
   );
 
   let personalDataType = "";
@@ -468,7 +430,7 @@ function analyzeMetadata(tableName, columnName) {
     else if (directName) personalDataType = compactColumn.includes("username") || compactColumn.includes("login") ? "Identifier" : "Name";
     else if (directBirthDate || demographicPersonal) personalDataType = "Demographic Attribute";
     else if (locationIdentifier) personalDataType = "Location Data";
-    else if (deviceIdentifier) personalDataType = "Device / Network Identifier";
+    else if (strongDeviceIdentifier || weakIdentifierAsPersonal) personalDataType = "Device / Network Identifier";
     else personalDataType = "Identifier";
   }
 
@@ -479,6 +441,7 @@ function analyzeMetadata(tableName, columnName) {
     referenceTable,
     genericColumn,
     publicReference,
+    pureSystemField,
     highRiskSecret,
     governmentId,
     financialAccount,
@@ -487,15 +450,18 @@ function analyzeMetadata(tableName, columnName) {
     directContact,
     directName,
     strongPersonal,
+    strongDeviceIdentifier,
+    weakDeviceIdentifier,
     subjectTable,
     subjectSpecificIdentifier,
+    subjectSpecificIdentifierColumn,
     personalFinancial,
     demographicPersonal,
     personalData,
     personalDataType,
     specialCategory,
-    operational: /(audit|event|transaction|order|case|ticket|workflow|approval|payment|invoice|contract|asset|inventory|integration|interface)/i.test(metadata),
-    internalOnly: /(internal|private|admin|security|permission|role|access|config|configuration|setting|rule|policy)/i.test(metadata),
+    operational: /(audit|transaction|order|case|ticket|workflow|approval|payment|invoice|contract|asset|inventory|integration|interface)/i.test(metadata),
+    internalOnly: /(internal|private|admin|security|permission|access|configuration|policy)/i.test(metadata),
     strongSensitive: highRiskSecret || secretSensitive,
   };
 }
@@ -526,6 +492,9 @@ function normalizeClassification(input) {
   const allowedConfidentiality = new Set(["Public", "Confidential", "Secret", "Top Secret"]);
   const confidentiality = allowedConfidentiality.has(input.confidentiality) ? input.confidentiality : "Confidential";
   const yesNo = (value, fallback = "No") => (String(value).toLowerCase() === "yes" ? "Yes" : String(value).toLowerCase() === "no" ? "No" : fallback);
+  const evidence = Array.isArray(input.evidence)
+    ? input.evidence.map((item) => String(item || "").slice(0, 80)).filter(Boolean).slice(0, 10)
+    : [];
   return {
     confidentiality,
     reason: String(input.reason || input.confReason || "Classification reason generated from TableName and ColumnName.").slice(0, 500),
@@ -537,6 +506,7 @@ function normalizeClassification(input) {
     specialCategory: yesNo(input.specialCategory, "No"),
     confidenceScore: Math.max(0, Math.min(1, Number(input.confidenceScore != null ? input.confidenceScore : 0.75))),
     policyRecommendation: String(input.policyRecommendation || "review needed").slice(0, 500),
+    evidence,
     source: input.source || "AI",
   };
 }

@@ -39,6 +39,22 @@ test("export workbook contains required sheets and reviewed data", async () => {
       crossBorderTransferFlags: "No Flags Recorded",
       governanceNotes: "Export governance notes",
     },
+    contextPoints: [
+      {
+        tag: "System Description",
+        content: "HR and payroll platform with applicant tracking.",
+        createdBy: "owner@example.com",
+        createdAt: "2026-05-01T00:00:00.000Z",
+        updatedAt: "2026-05-10T00:00:00.000Z",
+      },
+      {
+        tag: "Data Sources",
+        content: "Internal HR database and recruitment portal.",
+        createdBy: "owner@example.com",
+        createdAt: "2026-05-02T00:00:00.000Z",
+        updatedAt: "2026-05-02T00:00:00.000Z",
+      },
+    ],
   });
 
   const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
@@ -46,7 +62,12 @@ test("export workbook contains required sheets and reviewed data", async () => {
 
   const parsed = new ExcelJS.Workbook();
   await parsed.xlsx.load(buffer);
-  assert.deepEqual(parsed.worksheets.map((sheet) => sheet.name), ["Overall", "System Data", "Personal Data", "PDPL"]);
+  // Exactly five sheets, in the required order. No extra sheets (no "Links & General Info",
+  // no second workbook, no companion file).
+  assert.deepEqual(
+    parsed.worksheets.map((sheet) => sheet.name),
+    ["Overall", "System Data", "Personal Data", "System Context", "PDPL"]
+  );
 
   const systemRows = worksheetObjects(parsed.getWorksheet("System Data"));
   assert.equal(systemRows.length, 4);
@@ -59,11 +80,36 @@ test("export workbook contains required sheets and reviewed data", async () => {
   assert.equal(personalRows.some((row) => row.TableName === "JobParameter" && row.ColumnName === "Name"), false);
   assert.equal(personalRows.some((row) => row.TableName === "Users" && row.ColumnName === "Email"), true);
 
+  const contextRows = worksheetObjects(parsed.getWorksheet("System Context"), 6);
+  assert.equal(contextRows.length, 2);
+  assert.equal(contextRows[0]["Context Tag"], "System Description");
+  assert.equal(contextRows[1]["Context Tag"], "Data Sources");
+
   const pdplRows = worksheetObjects(parsed.getWorksheet("PDPL"), 8);
   assert.equal(pdplRows.some((row) => row.Table === "Employees" && row.Column === "FullName"), true);
   assert.equal(pdplRows.some((row) => row.Table === "Applicants" && row.Column === "NationalId"), true);
   assert.equal(pdplRows.some((row) => row.Table === "Users" && row.Column === "Email"), false);
   assert.equal(pdplRows.every((row) => row["PDPL Approval Status"] === "Approved"), true);
+});
+
+test("export workbook renders System Context placeholder when no context recorded", async () => {
+  const workbook = await buildSystemDataExport({
+    system: { name: "No Context System" },
+    originalColumns: ["TableName", "ColumnName"],
+    rows: [],
+    summary: { totalRecords: 0 },
+    pdpl: {},
+    contextPoints: [],
+  });
+  const parsed = new ExcelJS.Workbook();
+  await parsed.xlsx.load(Buffer.from(await workbook.xlsx.writeBuffer()));
+  assert.deepEqual(
+    parsed.worksheets.map((sheet) => sheet.name),
+    ["Overall", "System Data", "Personal Data", "System Context", "PDPL"]
+  );
+  const contextRows = worksheetObjects(parsed.getWorksheet("System Context"), 6);
+  assert.equal(contextRows.length, 1);
+  assert.equal(contextRows[0]["Context Tag"], "No context recorded");
 });
 
 function sampleRows() {
