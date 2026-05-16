@@ -80,6 +80,69 @@ async function api(url, options = {}) {
   return data;
 }
 
+async function downloadSystemExport() {
+  if (!state.currentSystem) return;
+  closeActionsMenu();
+  updateFileNameLabels(state.currentSystem.lastUploadFileName || "No file uploaded");
+  const button = qs("#exportExcelButton");
+  button.disabled = true;
+
+  try {
+    const response = await fetch(`/api/systems/${state.currentSystem.id}/export`, {
+      credentials: "same-origin",
+    });
+
+    if (response.status === 401 && state.user) {
+      state.user = null;
+      window.location.replace("/");
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error(await exportErrorMessage(response));
+    }
+
+    const blob = await response.blob();
+    if (!blob.size) throw new Error("The exported workbook was empty.");
+
+    const fileName = fileNameFromContentDisposition(response.headers.get("content-disposition"))
+      || `${safeFileStem(state.currentSystem.name)}-classification-report.xlsx`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Report download started.");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function exportErrorMessage(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    const payload = await response.json().catch(() => ({}));
+    return payload.error || payload.message || `Export failed with status ${response.status}.`;
+  }
+  const text = await response.text().catch(() => "");
+  return text || `Export failed with status ${response.status}.`;
+}
+
+function fileNameFromContentDisposition(header) {
+  const value = String(header || "");
+  const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match) return decodeURIComponent(utf8Match[1]);
+  const asciiMatch = value.match(/filename="?([^";]+)"?/i);
+  return asciiMatch ? asciiMatch[1] : "";
+}
+
+function safeFileStem(value) {
+  return String(value || "system").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "system";
+}
+
 function bindAuthEvents() {
   qsa(".auth-tab").forEach((button) => {
     button.addEventListener("click", () => switchAuthTab(button.dataset.authTab));
@@ -245,10 +308,7 @@ function bindDataEvents() {
     startClassification("all");
   });
   qs("#exportExcelButton").addEventListener("click", () => {
-    if (!state.currentSystem) return;
-    closeActionsMenu();
-    updateFileNameLabels(state.currentSystem.lastUploadFileName || "No file uploaded");
-    window.location.href = `/api/systems/${state.currentSystem.id}/export`;
+    downloadSystemExport().catch((error) => toast(error.message || "Export failed."));
   });
 
   qs("#recordSearch").addEventListener("input", debounce((event) => {

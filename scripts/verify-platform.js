@@ -13,6 +13,11 @@ function headers(extra = {}) {
 }
 
 async function request(url, options = {}) {
+  const result = await requestWithResponse(url, options);
+  return result.body;
+}
+
+async function requestWithResponse(url, options = {}) {
   const response = await fetch(`${BASE}${url}`, {
     ...options,
     headers: headers(options.headers || {}),
@@ -24,7 +29,7 @@ async function request(url, options = {}) {
   if (!response.ok) {
     throw new Error(typeof body === "object" && body.error ? body.error : `Request failed: ${response.status}`);
   }
-  return body;
+  return { body, headers: response.headers, status: response.status };
 }
 
 async function main() {
@@ -124,8 +129,8 @@ async function main() {
 
   const excelClassificationOrder = await runClassificationJob(excelSystem.system.id, "all");
   assertAscendingRowOrder(excelClassificationOrder, "Excel");
-  const classifiedExcelRecords = await request(`/api/systems/${excelSystem.system.id}/records?page=1&pageSize=10`);
-  const classifiedRow = classifiedExcelRecords.records[0];
+  const classifiedExcelRecords = await request(`/api/systems/${excelSystem.system.id}/records?page=1&pageSize=100`);
+  const classifiedRow = findRecord(classifiedExcelRecords.records, "Employees", "FullName");
   if (!classifiedRow.confidentiality || classifiedRow.confidentiality === "Pending") {
     throw new Error("Confidentiality did not persist after classification.");
   }
@@ -134,6 +139,30 @@ async function main() {
   }
   if (!/Bahrain PDPL/i.test(`${classifiedRow.confReason} ${classifiedRow.personalReason}`)) {
     throw new Error("Bahrain-law-grounded reasoning was not stored with classification results.");
+  }
+  const jobParameterName = findRecord(classifiedExcelRecords.records, "JobParameter", "Name");
+  const settingsValue = findRecord(classifiedExcelRecords.records, "Settings", "Value");
+  if (jobParameterName.personalData !== "No") {
+    throw new Error("JobParameter.Name was incorrectly marked as personal data.");
+  }
+  if (settingsValue.personalData !== "No") {
+    throw new Error("Settings.Value was incorrectly marked as personal data.");
+  }
+  for (const [tableName, columnName] of [
+    ["Users", "Email"],
+    ["Users", "PhoneNumber"],
+    ["Applicants", "NationalId"],
+    ["Orders", "OwnerName"],
+  ]) {
+    const record = findRecord(classifiedExcelRecords.records, tableName, columnName);
+    if (record.personalData !== "Yes") {
+      throw new Error(`${tableName}.${columnName} was not marked as personal data.`);
+    }
+  }
+  const allSecret = classifiedExcelRecords.records.every((record) => ["Secret", "Top Secret"].includes(record.confidentiality));
+  const allPersonal = classifiedExcelRecords.records.every((record) => record.personalData === "Yes");
+  if (allSecret || allPersonal) {
+    throw new Error("System Context caused all rows to become Secret or Personal Data.");
   }
   await request(`/api/records/${classifiedRow.id}`, {
     method: "PUT",
@@ -145,7 +174,7 @@ async function main() {
       personalReason: "Manual edit confirms this employee field can identify an individual.",
     }),
   });
-  const editedRecords = await request(`/api/systems/${excelSystem.system.id}/records?page=1&pageSize=10`);
+  const editedRecords = await request(`/api/systems/${excelSystem.system.id}/records?page=1&pageSize=100`);
   const editedRow = editedRecords.records.find((record) => record.id === classifiedRow.id);
   if (
     editedRow.confidentiality !== "Secret" ||
@@ -160,15 +189,18 @@ async function main() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reviewed: true }),
   });
-  const reviewedRecords = await request(`/api/systems/${excelSystem.system.id}/records?page=1&pageSize=10`);
-  if (reviewedRecords.records[0].systemReviewStatus !== "Approved") {
+  const reviewedRecords = await request(`/api/systems/${excelSystem.system.id}/records?page=1&pageSize=100`);
+  if (findRecord(reviewedRecords.records, "Employees", "FullName").systemReviewStatus !== "Approved") {
     throw new Error("System Data review state did not persist.");
   }
   const personalRows = await request(`/api/systems/${excelSystem.system.id}/records?personalOnly=true&page=1&pageSize=100`);
+  if (personalRows.records.some((record) => record.tableName === "JobParameter" && record.columnName === "Name")) {
+    throw new Error("Personal Data API included generic technical JobParameter.Name.");
+  }
   await request(`/api/systems/${excelSystem.system.id}/personal-approvals`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ recordIds: personalRows.records.map((record) => record.id) }),
+    body: JSON.stringify({ recordIds: [classifiedRow.id] }),
   });
   const pdpl = await request(`/api/systems/${excelSystem.system.id}/pdpl`);
   const obligation = pdpl.obligations.find((item) => item.id === classifiedRow.id);
@@ -176,25 +208,59 @@ async function main() {
     throw new Error("PDPL obligation review status was not driven by Personal Data approval.");
   }
 
-  const exportBuffer = await request(`/api/systems/${excelSystem.system.id}/export`);
+  const exportResponse = await requestWithResponse(`/api/systems/${excelSystem.system.id}/export`);
+  const exportBuffer = exportResponse.body;
+  const exportContentType = exportResponse.headers.get("content-type") || "";
+  const exportDisposition = exportResponse.headers.get("content-disposition") || "";
+  if (!exportContentType.includes("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) {
+    throw new Error("Export response used the wrong workbook MIME type.");
+  }
+  if (!/attachment/i.test(exportDisposition) || !/\.xlsx/i.test(exportDisposition)) {
+    throw new Error("Export response did not include an Excel attachment filename.");
+  }
   const exportPath = path.join(tmpDir, "verification-export.xlsx");
   fs.writeFileSync(exportPath, Buffer.from(exportBuffer));
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(exportPath);
   const sheetNames = workbook.worksheets.map((sheet) => sheet.name);
-  const requiredSheets = ["Overall", "Data Classification", "Personal Data", "Links & General Info"];
+  const requiredSheets = ["Overall", "System Data", "Personal Data", "PDPL"];
   for (const sheet of requiredSheets) {
     if (!sheetNames.includes(sheet)) throw new Error(`Missing export sheet: ${sheet}`);
   }
-  const systemDataHeaders = workbook.getWorksheet("Data Classification").getRow(1).values.join("|");
+  const systemDataSheet = workbook.getWorksheet("System Data");
+  const personalDataSheet = workbook.getWorksheet("Personal Data");
+  const pdplSheet = workbook.getWorksheet("PDPL");
+  const systemDataHeaders = systemDataSheet.getRow(1).values.join("|");
   if (!systemDataHeaders.includes("Source") || !systemDataHeaders.includes("Retention")) {
     throw new Error("Export did not preserve uploaded Excel columns.");
   }
+  const systemRows = worksheetObjects(systemDataSheet);
+  if (systemRows.length !== classifiedExcelRecords.records.length) {
+    throw new Error("System Data export did not include all imported metadata records.");
+  }
+  const exportedReviewedRow = systemRows.find((row) => row.TableName === "Employees" && row.ColumnName === "FullName");
+  if (
+    !exportedReviewedRow ||
+    exportedReviewedRow.Confidentiality !== "Secret" ||
+    exportedReviewedRow["Personal Data"] !== "Yes" ||
+    exportedReviewedRow["System Data Review"] !== "Approved"
+  ) {
+    throw new Error("System Data export did not include final reviewed classification values.");
+  }
+  const personalExportRows = worksheetObjects(personalDataSheet);
+  if (personalExportRows.some((row) => row.TableName === "JobParameter" && row.ColumnName === "Name")) {
+    throw new Error("Personal Data export included generic technical JobParameter.Name.");
+  }
+  const pdplRows = worksheetObjects(pdplSheet, 8);
+  if (!pdplRows.some((row) => row.Table === "Employees" && row.Column === "FullName" && row["PDPL Approval Status"] === "Approved")) {
+    throw new Error("PDPL export did not include the approved personal data record.");
+  }
+  const unapprovedPersonalIds = new Set(personalRows.records.filter((record) => record.id !== classifiedRow.id).map((record) => `${record.tableName}.${record.columnName}`));
+  if (pdplRows.some((row) => unapprovedPersonalIds.has(`${row.Table}.${row.Column}`))) {
+    throw new Error("PDPL export included unapproved personal data records.");
+  }
   if (!worksheetContains(workbook.getWorksheet("Overall"), "Personal Data Type Counts")) {
     throw new Error("Overall export sheet did not include personal data type counts.");
-  }
-  if (!worksheetContains(workbook.getWorksheet("Links & General Info"), "Personal Data Type Counts")) {
-    throw new Error("Links & General Info export sheet did not include personal data type counts.");
   }
   await request(`/api/systems/${csvSystem.system.id}`, {
     method: "DELETE",
@@ -235,6 +301,12 @@ async function createExcelFixture(filePath) {
   sheet.addRow(["Employees", "FullName", "nvarchar", "HRMS", "7 years"]);
   sheet.addRow(["Employees", "SalaryAmount", "decimal", "Payroll", "10 years"]);
   sheet.addRow(["AuditEvents", "EventTime", "datetime", "Security", "2 years"]);
+  sheet.addRow(["JobParameter", "Name", "nvarchar", "HangFire", "30 days"]);
+  sheet.addRow(["Settings", "Value", "nvarchar", "Configuration", "30 days"]);
+  sheet.addRow(["Users", "Email", "nvarchar", "IAM", "7 years"]);
+  sheet.addRow(["Users", "PhoneNumber", "nvarchar", "IAM", "7 years"]);
+  sheet.addRow(["Applicants", "NationalId", "nvarchar", "Recruitment", "10 years"]);
+  sheet.addRow(["Orders", "OwnerName", "nvarchar", "Sales", "5 years"]);
   await workbook.xlsx.writeFile(filePath);
 }
 
@@ -253,6 +325,28 @@ function worksheetContains(sheet, expected) {
   return sheet.getSheetValues().some((row) =>
     Array.isArray(row) && row.some((cell) => String(cell || "").toLowerCase().includes(needle))
   );
+}
+
+function worksheetObjects(sheet, headerRowNumber = 1) {
+  const headers = sheet.getRow(headerRowNumber).values.slice(1).map((value) => String(value || ""));
+  const rows = [];
+  for (let rowNumber = headerRowNumber + 1; rowNumber <= sheet.rowCount; rowNumber += 1) {
+    const row = sheet.getRow(rowNumber);
+    const values = row.values.slice(1);
+    if (!values.some((value) => value != null && String(value) !== "")) continue;
+    const item = {};
+    headers.forEach((header, index) => {
+      if (header) item[header] = values[index] == null ? "" : values[index];
+    });
+    rows.push(item);
+  }
+  return rows;
+}
+
+function findRecord(records, tableName, columnName) {
+  const record = records.find((item) => item.tableName === tableName && item.columnName === columnName);
+  if (!record) throw new Error(`Missing record ${tableName}.${columnName}`);
+  return record;
 }
 
 function assertAscendingRowOrder(rowIndexes, label) {

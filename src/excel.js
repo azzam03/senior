@@ -102,17 +102,113 @@ function findColumn(columns, expected) {
   return columns.find((column) => String(column).toLowerCase().replace(/[^a-z0-9]/g, "") === target);
 }
 
-async function buildSystemDataExport({ system, rows, originalColumns, summary, pdpl, links = [] }) {
+async function buildSystemDataExport({ system, rows, originalColumns, summary, pdpl }) {
+  const safeSystem = normalizeSystem(system);
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const safeColumns = normalizeOriginalColumns(originalColumns, safeRows);
+  const safeSummary = normalizeSummary(summary);
+  const safePdpl = normalizePdpl(pdpl);
+  const personalRows = safeRows.filter(isPersonalDataRecord);
+  const approvedPersonalRows = personalRows.filter(isApprovedPersonalRecord);
+
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "DATA CLASSIFICATION & GOVERNANCE PLATFORM";
   workbook.created = new Date();
 
-  buildOverallSheet(workbook, { system, summary, pdpl });
-  buildDataSheet(workbook, "Data Classification", rows, originalColumns, false);
-  buildDataSheet(workbook, "Personal Data", rows.filter((row) => row.personalData === "Yes"), originalColumns, true);
-  buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links });
+  buildOverallSheet(workbook, { system: safeSystem, summary: safeSummary, pdpl: safePdpl });
+  buildDataSheet(workbook, "System Data", safeRows, safeColumns, false);
+  buildDataSheet(workbook, "Personal Data", personalRows, safeColumns, true);
+  buildPdplSheet(workbook, { system: safeSystem, rows: approvedPersonalRows, pdpl: safePdpl });
 
   return workbook;
+}
+
+function normalizeSystem(system = {}) {
+  return {
+    name: system.name || "System",
+    owner: system.owner || "",
+    dba: system.dba || "",
+    ownerEmail: system.ownerEmail || "",
+    systemGroup: system.systemGroup || "",
+    assignedConsultant: system.assignedConsultant || "",
+    sourceSystemRef: system.sourceSystemRef || "",
+    targetSystemRef: system.targetSystemRef || "",
+    relatedSystemLinks: system.relatedSystemLinks || "",
+    lastUploadFileName: system.lastUploadFileName || "",
+    status: system.status || "In Progress",
+  };
+}
+
+function normalizeSummary(summary = {}) {
+  const totalRecords = Number(summary.totalRecords || 0);
+  const classified = Number(summary.classified || 0);
+  const personal = Number(summary.personal || 0);
+  const pending = Number(summary.pending || Math.max(0, totalRecords - classified));
+  const confidentiality = summary.confidentiality || {};
+  return {
+    totalRecords,
+    classified,
+    classifiedPercentage: numberOrPercent(summary.classifiedPercentage, classified, totalRecords),
+    personal,
+    personalPercentage: numberOrPercent(summary.personalPercentage, personal, totalRecords),
+    pending,
+    pendingPercentage: numberOrPercent(summary.pendingPercentage, pending, totalRecords),
+    reviewQueue: Number(summary.reviewQueue || 0),
+    lowConfidence: Number(summary.lowConfidence || 0),
+    tablesWithPersonalData: Number(summary.tablesWithPersonalData || 0),
+    policyRecommendationCount: Number(summary.policyRecommendationCount || 0),
+    classificationProgress: numberOrPercent(summary.classificationProgress, classified, totalRecords),
+    confidentiality: {
+      Confidential: Number(confidentiality.Confidential || 0),
+      Secret: Number(confidentiality.Secret || 0),
+      "Top Secret": Number(confidentiality["Top Secret"] || 0),
+      Public: Number(confidentiality.Public || 0),
+      Pending: Number(confidentiality.Pending || 0),
+    },
+    personalDataTypes: summary.personalDataTypes || {},
+  };
+}
+
+function numberOrPercent(value, part, total) {
+  if (value != null && value !== "") return Number(value || 0);
+  return total ? Math.round((Number(part || 0) / Number(total || 1)) * 100) : 0;
+}
+
+function normalizePdpl(pdpl = {}) {
+  return {
+    dataSubjectRightsCoverage: pdpl?.dataSubjectRightsCoverage || "Needs Review",
+    consentTrackingStatus: pdpl?.consentTrackingStatus || "Needs Review",
+    crossBorderTransferFlags: pdpl?.crossBorderTransferFlags || "No Flags Recorded",
+    governanceNotes: pdpl?.governanceNotes || "",
+  };
+}
+
+function normalizeOriginalColumns(originalColumns, rows) {
+  const columns = [];
+  const seen = new Set();
+  const add = (column) => {
+    const label = String(column || "").trim();
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    columns.push(label);
+  };
+
+  if (Array.isArray(originalColumns)) originalColumns.forEach(add);
+  rows.forEach((row) => {
+    Object.keys(row.original || {}).forEach(add);
+  });
+  if (!columns.length && rows.length) {
+    ["TableName", "ColumnName", "DataType"].forEach(add);
+  }
+  return columns;
+}
+
+function isPersonalDataRecord(row) {
+  return String(row?.personalData || "").toLowerCase() === "yes";
+}
+
+function isApprovedPersonalRecord(row) {
+  return isPersonalDataRecord(row) && String(row?.personalReviewStatus || "").toLowerCase() === "approved";
 }
 
 function buildOverallSheet(workbook, { system, summary, pdpl }) {
@@ -439,7 +535,7 @@ function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links 
   addSectionHeader(sheet, linksStart, "Reference Links");
   const headerRowNumber = linksStart + 1;
   const headers = ["Title", "URL", "Category", "Description", "Created By", "Updated At"];
-  sheet.getRow(headerRowNumber).values = [null, ...headers];
+  sheet.getRow(headerRowNumber).values = headers;
   sheet.getRow(headerRowNumber).height = 24;
   sheet.getRow(headerRowNumber).eachCell((cell) => {
     cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
@@ -485,9 +581,6 @@ function buildLinksAndGeneralInfoSheet(workbook, { system, summary, pdpl, links 
   applyOuterBorders(sheet, `A1:F${Math.max(headerRowNumber + Math.max(links.length, 1), headerRowNumber)}`);
 }
 
-// buildPdplSheet is not currently wired into buildSystemDataExport.
-// To include a dedicated PDPL sheet in the export, call it from there and
-// add its name to the module.exports if needed.
 function buildPdplSheet(workbook, { system, rows, pdpl }) {
   const sheet = workbook.addWorksheet("PDPL", {
     views: [{ state: "frozen", ySplit: 5, showGridLines: false }],
@@ -528,7 +621,7 @@ function buildPdplSheet(workbook, { system, rows, pdpl }) {
     "Approved By",
     "Approved At",
   ];
-  sheet.getRow(headerRowNumber).values = [null, ...headers];
+  sheet.getRow(headerRowNumber).values = headers;
   sheet.getRow(headerRowNumber).height = 26;
   sheet.getRow(headerRowNumber).eachCell((cell) => {
     cell.font = { bold: true, color: { argb: "FFFFFFFF" } };

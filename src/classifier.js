@@ -5,7 +5,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_TIMEOUT_MS = Math.max(5000, Number(process.env.OPENAI_TIMEOUT_MS || 25000));
 const OPENAI_NO_CREDITS_CODE = "OPENAI_NO_CREDITS";
-const CLASSIFICATION_POLICY_VERSION = "bahrain-pdpl-v3";
+const CLASSIFICATION_POLICY_VERSION = "bahrain-pdpl-v4";
 const BAHRAIN_PDPL_REFERENCE_URL = "https://www.pdp.gov.bh/en/assets/pdf/regulations.pdf";
 
 const BAHRAIN_PDPL_CONTEXT = [
@@ -13,7 +13,7 @@ const BAHRAIN_PDPL_CONTEXT = [
   "Treat any information concerning an identified individual, or an individual who can be directly or indirectly identified by identifiers or factors specific to physical, physiological, intellectual, cultural, economic, or social identity, as personal data.",
   "Treat sensitive personal data indicators such as race or ethnic origin, political or philosophical opinions, religious beliefs, union affiliation, criminal record, health, sexual status, biometric or genetic indicators as requiring enhanced safeguards.",
   "For likely personal data, reflect Bahrain PDPL expectations around lawful basis or consent, purpose limitation, proportionality, security safeguards, data subject rights, retention discipline, and cross-border transfer review where relevant.",
-  "Where direct PDPL evidence is weak, still classify conservatively using enterprise business sensitivity instead of returning an empty no-signal explanation.",
+  "Where direct PDPL evidence is weak, explain the uncertainty, keep the result reviewable by a human, and do not turn broad system context into personal-data or Secret evidence.",
 ].join(" ");
 
 async function classifyRecords(records, contextPoints) {
@@ -186,10 +186,18 @@ function buildPrompt(records, contextPoints) {
         "Use only tableName, columnName, and systemContext. Do not infer from other uploaded columns.",
         "Ground confidentiality and personal-data reasons in Bahrain's Personal Data Protection Law and official Bahrain data protection regulatory concepts.",
         "Do not cite raw article numbers or implementation notes; provide concise business-readable legal relevance.",
-        "If TableName and ColumnName do not provide enough evidence for a direct Bahrain PDPL conclusion, do not return a generic no-signal reason. Use a conservative enterprise data-classification heuristic and explain that the reason is business-sensitivity based.",
-        "Avoid Public for internal identifiers, employee/customer/user references, operational records, credentials, HR/payroll data, banking data, audit data, and confidential business-only records.",
+        "System Context may describe the system and review posture, but it must not make every field Secret, Confidential, or Personal Data.",
+        "Personal Data = Yes only when the tableName and columnName together clearly suggest a field identifies, contacts, describes, or relates to a natural person.",
+        "Do not mark Personal Data = Yes only because the columnName is generic, including Name, Description, Code, Status, Type, Value, CreatedDate, UpdatedDate, CreatedBy, UpdatedBy, or Id.",
+        "Technical tables such as HangFire, JobParameter, BackgroundJobs, Settings, Configuration, Lookup, Status, Logs, AuditLogs, and system parameter tables must not be automatically marked as personal data.",
+        "JobParameter.Name should normally be Personal Data = No because it is a technical job parameter name, not a person's name.",
+        "Clearly personal fields such as Email, PhoneNumber, MobileNumber, NationalId, UserName, FullName, Address, ApplicantName, OwnerName, ContactNumber, or DateOfBirth should be Personal Data = Yes.",
+        "Use Secret only when there is strong metadata evidence of highly sensitive data such as national ID, password, token, financial account data, authentication secrets, health data, or legal/regulatory sensitive identifiers.",
+        "Business or operational fields may be Confidential, but do not automatically make them Secret.",
+        "If TableName and ColumnName are unclear, explain the uncertainty and keep the item reviewable by a human instead of over-classifying it.",
+        "Avoid Public for clear internal operational records, credentials, HR/payroll data, banking data, audit data, and confidential business-only records.",
         "confidentiality must be one of Public, Confidential, Secret, Top Secret.",
-        "personalData must be Yes or No. Location data (latitude, longitude, GPS) and device identifiers (IP address, MAC address, device_id, session_id) are personal data under Bahrain PDPL as they can identify individuals.",
+        "personalData must be Yes or No. Location data and device identifiers are personal data only when the metadata indicates they can identify or track a natural person, not merely because broad system context mentions users.",
         "confidenceScore must be a number from 0 to 1.",
         "policyRecommendation should use concise Bahrain PDPL governance language such as lawful basis review, consent required, masking recommended, restricted access, retention needed, transfer review needed, or no action.",
       ],
@@ -231,7 +239,7 @@ function classifyWithLocalRules(records, contextPoints) {
   return map;
 }
 
-function localClassification(tableName, columnName, contextPoints = []) {
+function legacyLocalClassification(tableName, columnName, contextPoints = []) {
   const table = String(tableName || "").toLowerCase();
   const column = String(columnName || "").toLowerCase();
   const context = contextPoints.map((point) => `${point.tag} ${point.content}`).join(" ").toLowerCase();
@@ -333,6 +341,187 @@ function localClassification(tableName, columnName, contextPoints = []) {
   });
 }
 
+function localClassification(tableName, columnName, contextPoints = []) {
+  const signal = analyzeMetadata(tableName, columnName);
+  const hasContext = Array.isArray(contextPoints) && contextPoints.length > 0;
+
+  let confidentiality = signal.publicReference ? "Public" : "Confidential";
+  let reason = signal.publicReference
+    ? "TableName and ColumnName look like reference metadata, so Public handling is reasonable unless a human reviewer identifies business sensitivity."
+    : "TableName and ColumnName do not provide strong sensitive-data evidence; keep this as Confidential and reviewable rather than escalating it from broad system context.";
+  let personalData = "No";
+  let personalReason = signal.genericColumn
+    ? "The column name is generic in this table context, so it is not personal data without clearer person-identifying metadata."
+    : "TableName and ColumnName do not clearly identify, contact, describe, or relate to a natural person, so Bahrain PDPL personal-data obligations are not triggered from this metadata alone.";
+  let personalDataType = "";
+  let pseudonymizable = "No";
+  let anonymizable = "Yes";
+  let specialCategory = "No";
+  let confidenceScore = signal.genericColumn || signal.technicalTable ? 0.68 : 0.74;
+  let policyRecommendation = hasContext ? "review needed; confirm with system owner" : "review needed";
+
+  if (signal.technicalTable && !signal.strongSensitive && !signal.strongPersonal) {
+    confidentiality = signal.publicReference ? "Public" : "Confidential";
+    reason = "This appears to be technical or system metadata; do not infer Secret or personal-data handling without a specific sensitive column signal.";
+    policyRecommendation = "technical metadata review";
+  }
+
+  if (signal.highRiskSecret) {
+    confidentiality = "Top Secret";
+    reason = "Column metadata indicates authentication secrets or credentials that require strict restricted access and masking.";
+    confidenceScore = 0.96;
+    policyRecommendation = "restricted access; masking recommended; enhanced safeguards";
+  } else if (signal.secretSensitive) {
+    confidentiality = "Secret";
+    reason = "Column metadata indicates a highly sensitive identifier, financial account, health, or regulated sensitive category requiring stronger controls.";
+    confidenceScore = 0.91;
+    policyRecommendation = "restricted access; masking recommended; lawful basis review; retention needed";
+  } else if (signal.strongPersonal || signal.subjectSpecificIdentifier || signal.personalFinancial || signal.demographicPersonal) {
+    confidentiality = "Confidential";
+    reason = "TableName and ColumnName indicate person-related metadata that should be protected with controlled access and governance review.";
+    confidenceScore = Math.max(confidenceScore, 0.84);
+    policyRecommendation = "masking recommended; lawful basis review; retention needed";
+  } else if (signal.operational || signal.internalOnly) {
+    confidentiality = "Confidential";
+    reason = "The field appears operational or internal business metadata; restrict from public exposure, but do not escalate to Secret without stronger evidence.";
+    confidenceScore = Math.max(confidenceScore, 0.76);
+    policyRecommendation = "restricted internal access; retention needed";
+  }
+
+  if (signal.personalData) {
+    personalData = "Yes";
+    personalReason = "TableName and ColumnName together indicate information that can identify, contact, describe, or relate to a natural person under Bahrain PDPL concepts.";
+    pseudonymizable = "Yes";
+    anonymizable = "Yes";
+    confidenceScore = Math.max(confidenceScore, 0.86);
+    personalDataType = signal.personalDataType;
+  }
+
+  if (signal.specialCategory) {
+    specialCategory = "Yes";
+    confidentiality = confidentiality === "Top Secret" ? "Top Secret" : "Secret";
+    policyRecommendation = "restricted access; explicit consent or lawful basis review; enhanced safeguards";
+    confidenceScore = Math.max(confidenceScore, 0.92);
+  }
+
+  return normalizeClassification({
+    confidentiality,
+    reason,
+    personalData,
+    personalReason,
+    personalDataType,
+    pseudonymizable,
+    anonymizable,
+    specialCategory,
+    confidenceScore,
+    policyRecommendation,
+    source: OPENAI_API_KEY ? "local fallback" : "local AI rules",
+  });
+}
+
+function analyzeMetadata(tableName, columnName) {
+  const table = String(tableName || "").toLowerCase();
+  const column = String(columnName || "").toLowerCase();
+  const compactTable = compact(table);
+  const compactColumn = compact(column);
+  const metadata = `${table} ${column}`;
+  const compactMetadata = `${compactTable} ${compactColumn}`;
+
+  const technicalTable = /(hangfire|jobparameter|backgroundjob|backgroundjobs|setting|settings|configuration|config|lookup|status|log|logs|auditlog|auditlogs|systemparameter|systemparameters|parameter|parameters)/i.test(compactTable);
+  const referenceTable = /(lookup|reference|status|type|category|catalog|currency|country)/i.test(compactTable);
+  const genericColumn = isGenericColumn(compactColumn);
+  const publicReference = referenceTable && genericColumn && !/(setting|configuration|config|parameter)/i.test(compactTable);
+
+  const highRiskSecret = /(password|passwd|token|secret|privatekey|apikey|credential|hash|salt|certificate|authkey)/i.test(compactColumn);
+  const governmentId = /(nationalid|nationalnumber|civilid|iqama|passport|ssn|nid|identitynumber|idnumber|licenseid|licensenumber)/i.test(compactColumn);
+  const financialAccount = /(iban|bankaccount|accountnumber|cardnumber|creditcard|debitcard|paymentaccount|swiftcode)/i.test(compactColumn);
+  const health = /(health|medical|diagnosis|patient|clinic|hospital|disability|biometric|genetic)/i.test(compactMetadata);
+  const specialCategory = /(health|medical|diagnosis|patient|biometric|genetic|religion|criminal|disability)/i.test(compactMetadata);
+  const secretSensitive = governmentId || financialAccount || health;
+
+  const directContact = /(email|emailaddress|phonenumber|phone|mobile|mobilenumber|contactnumber|telephone|address|postaladdress)/i.test(compactColumn);
+  const directName = /(fullname|firstname|lastname|middlename|arabicname|englishname|applicantname|ownername|contactname|customername|employeename|username|loginname|screenname)/i.test(compactColumn);
+  const directBirthDate = /(dateofbirth|birthdate|dob)/i.test(compactColumn);
+  const locationIdentifier = /(latitude|longitude|gps|geolocation|coordinates|location)/i.test(compactColumn);
+  const deviceIdentifier = /(ipaddress|ipaddr|macaddress|macaddr|deviceid|hardwareid|imei|imsi|cookieid|sessionid)/i.test(compactColumn);
+  const strongPersonal = directContact || directName || directBirthDate || governmentId || locationIdentifier || deviceIdentifier;
+
+  const subjectTable = /(employee|staff|customer|client|citizen|student|patient|beneficiary|user|person|applicant|driver|owner|resident|member)/i.test(compactTable);
+  const subjectSpecificIdentifier = /(employee|staff|customer|client|citizen|student|patient|beneficiary|user|person|applicant|driver|owner|resident|member)(id|number|code|ref|reference)$/i.test(compactColumn);
+  const personalFinancial = subjectTable && /(salary|payroll|income|tax|compensation|allowance)/i.test(compactColumn);
+  const demographicPersonal = subjectTable && /(age|gender|nationality|maritalstatus|religion)/i.test(compactColumn);
+
+  const genericTechnicalOnly = technicalTable && genericColumn && !strongPersonal && !secretSensitive && !highRiskSecret;
+  const personalData = !genericTechnicalOnly && (
+    strongPersonal ||
+    subjectSpecificIdentifier ||
+    personalFinancial ||
+    demographicPersonal
+  );
+
+  let personalDataType = "";
+  if (personalData) {
+    if (governmentId) personalDataType = "Government Identifier";
+    else if (health) personalDataType = "Health Data";
+    else if (financialAccount || personalFinancial) personalDataType = "Financial Data";
+    else if (directContact) personalDataType = "Contact Information";
+    else if (directName) personalDataType = compactColumn.includes("username") || compactColumn.includes("login") ? "Identifier" : "Name";
+    else if (directBirthDate || demographicPersonal) personalDataType = "Demographic Attribute";
+    else if (locationIdentifier) personalDataType = "Location Data";
+    else if (deviceIdentifier) personalDataType = "Device / Network Identifier";
+    else personalDataType = "Identifier";
+  }
+
+  return {
+    table,
+    column,
+    technicalTable,
+    referenceTable,
+    genericColumn,
+    publicReference,
+    highRiskSecret,
+    governmentId,
+    financialAccount,
+    health,
+    secretSensitive,
+    directContact,
+    directName,
+    strongPersonal,
+    subjectTable,
+    subjectSpecificIdentifier,
+    personalFinancial,
+    demographicPersonal,
+    personalData,
+    personalDataType,
+    specialCategory,
+    operational: /(audit|event|transaction|order|case|ticket|workflow|approval|payment|invoice|contract|asset|inventory|integration|interface)/i.test(metadata),
+    internalOnly: /(internal|private|admin|security|permission|role|access|config|configuration|setting|rule|policy)/i.test(metadata),
+    strongSensitive: highRiskSecret || secretSensitive,
+  };
+}
+
+function compact(value) {
+  return String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function isGenericColumn(compactColumn) {
+  return new Set([
+    "name",
+    "description",
+    "code",
+    "status",
+    "type",
+    "value",
+    "createddate",
+    "updateddate",
+    "createdby",
+    "updatedby",
+    "id",
+    "rowid",
+    "guid",
+  ]).has(compactColumn);
+}
+
 function normalizeClassification(input) {
   const allowedConfidentiality = new Set(["Public", "Confidential", "Secret", "Top Secret"]);
   const confidentiality = allowedConfidentiality.has(input.confidentiality) ? input.confidentiality : "Confidential";
@@ -354,6 +543,7 @@ function normalizeClassification(input) {
 
 function strengthenClassification(result, record, contextPoints) {
   const fallback = localClassification(record.tableName, record.columnName, contextPoints);
+  const signal = analyzeMetadata(record.tableName, record.columnName);
   const strengthened = { ...result };
 
   if (isWeakGenericReason(strengthened.reason)) {
@@ -379,6 +569,28 @@ function strengthenClassification(result, record, contextPoints) {
     strengthened.anonymizable = fallback.anonymizable;
     strengthened.specialCategory = fallback.specialCategory;
     strengthened.confidenceScore = Math.max(strengthened.confidenceScore, fallback.confidenceScore);
+    strengthened.policyRecommendation = fallback.policyRecommendation;
+  }
+
+  if (strengthened.personalData === "Yes" && fallback.personalData === "No" && !signal.personalData) {
+    strengthened.personalData = "No";
+    strengthened.personalReason = fallback.personalReason;
+    strengthened.personalDataType = "";
+    strengthened.pseudonymizable = "No";
+    strengthened.anonymizable = fallback.anonymizable;
+    strengthened.specialCategory = fallback.specialCategory;
+    strengthened.confidenceScore = Math.min(strengthened.confidenceScore, fallback.confidenceScore);
+    strengthened.policyRecommendation = fallback.policyRecommendation;
+  }
+
+  if (
+    ["Secret", "Top Secret"].includes(strengthened.confidentiality) &&
+    !signal.strongSensitive &&
+    !signal.specialCategory
+  ) {
+    strengthened.confidentiality = fallback.confidentiality;
+    strengthened.reason = fallback.reason;
+    strengthened.confidenceScore = Math.min(strengthened.confidenceScore, fallback.confidenceScore);
     strengthened.policyRecommendation = fallback.policyRecommendation;
   }
 

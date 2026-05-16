@@ -839,6 +839,19 @@ function pct(part, total) {
   return total ? Math.round((part / total) * 100) : 0;
 }
 
+function exportFileName(systemName) {
+  const safeName = normalize(systemName)
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80) || "system";
+  return `${safeName}-classification-report.xlsx`;
+}
+
+function contentDispositionAttachment(fileName) {
+  const asciiName = fileName.replace(/[^a-zA-Z0-9._-]/g, "-");
+  return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+}
+
 function getDashboardSummary(userId) {
   const db = getDb();
   const systems = db.prepare("SELECT * FROM systems WHERE userId = ? ORDER BY updatedAt DESC").all(userId);
@@ -1607,25 +1620,31 @@ app.get("/api/systems/:id/classification-jobs/:jobId/stream", requireAuth, requi
 //   POST   /api/systems/:id/classification-jobs
 //   GET    /api/systems/:id/classification-jobs/:jobId/stream
 
-app.get("/api/systems/:id/export", requireAuth, requireSystemAccess, async (req, res) => {
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM data_records WHERE systemId = ? ORDER BY rowIndex").all(req.system.id).map(recordToApi);
-  const pdpl = db.prepare("SELECT * FROM pdpl_notes WHERE systemId = ?").get(req.system.id);
-  const links = db.prepare("SELECT * FROM system_links WHERE systemId = ? ORDER BY category, title").all(req.system.id);
-  const workbook = await buildSystemDataExport({
-    system: req.system,
-    rows,
-    originalColumns: getOriginalColumns(req.system.id),
-    summary: getSystemSummary(req.system.id),
-    pdpl,
-    links,
-  });
+app.get("/api/systems/:id/export", requireAuth, requireSystemAccess, async (req, res, next) => {
+  try {
+    const db = getDb();
+    const rows = db.prepare("SELECT * FROM data_records WHERE systemId = ? ORDER BY rowIndex ASC").all(req.system.id).map(recordToApi);
+    const pdpl = db.prepare("SELECT * FROM pdpl_notes WHERE systemId = ?").get(req.system.id);
+    const workbook = await buildSystemDataExport({
+      system: req.system,
+      rows,
+      originalColumns: getOriginalColumns(req.system.id),
+      summary: getSystemSummary(req.system.id),
+      pdpl,
+    });
 
-  const safeName = req.system.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "system";
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename="${safeName}-classification-report.xlsx"`);
-  await workbook.xlsx.write(res);
-  res.end();
+    const fileName = exportFileName(req.system.name);
+    const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+    res.status(200);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
+    res.setHeader("Content-Length", String(buffer.length));
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(buffer);
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/", authOptional, (req, res) => {

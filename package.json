@@ -8,6 +8,7 @@
     "start": "node --no-warnings server.js",
     "dev": "node --no-warnings server.js",
     "platform:start": "node scripts/start-platform.js",
+    "test": "node --test",
     "verify": "node scripts/verify-platform.js"
   },
   "dependencies": {
