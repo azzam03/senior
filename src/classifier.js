@@ -596,4 +596,186 @@ function hasEmailSample(sampleText) {
 }
 
 function hasPhoneSample(sampleText) {
-  return /(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?
+  return /(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?){2,4}\d{3,4}/.test(sampleText);
+}
+
+function compact(value) {
+  return String(value || "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function isGenericColumn(compactColumn) {
+  return new Set([
+    "name",
+    "description",
+    "code",
+    "status",
+    "type",
+    "value",
+    "createddate",
+    "updateddate",
+    "createdby",
+    "updatedby",
+    "id",
+    "rowid",
+    "guid",
+  ]).has(compactColumn);
+}
+
+function normalizeClassification(input) {
+  const allowedConfidentiality = new Set(["Public", "Confidential", "Secret", "Top Secret"]);
+  const confidentiality = allowedConfidentiality.has(input.confidentiality) ? input.confidentiality : "Confidential";
+  const yesNo = (value, fallback = "No") => (String(value).toLowerCase() === "yes" ? "Yes" : String(value).toLowerCase() === "no" ? "No" : fallback);
+  const evidence = Array.isArray(input.evidence)
+    ? input.evidence.map((item) => String(item || "").slice(0, 80)).filter(Boolean).slice(0, 10)
+    : [];
+  return {
+    confidentiality,
+    reason: String(input.reason || input.confReason || "Classification reason generated from TableName and ColumnName.").slice(0, 500),
+    personalData: yesNo(input.personalData, "No"),
+    personalReason: String(input.personalReason || "Personal data assessment generated from TableName and ColumnName.").slice(0, 500),
+    personalDataType: String(input.personalDataType || "").slice(0, 120),
+    pseudonymizable: yesNo(input.pseudonymizable, "No"),
+    anonymizable: yesNo(input.anonymizable, "Yes"),
+    specialCategory: yesNo(input.specialCategory, "No"),
+    confidenceScore: Math.max(0, Math.min(1, Number(input.confidenceScore != null ? input.confidenceScore : 0.75))),
+    policyRecommendation: String(input.policyRecommendation || "review needed").slice(0, 500),
+    evidence,
+    source: input.source || "AI",
+  };
+}
+
+function strengthenClassification(result, record, contextPoints) {
+  const fallback = localClassification(record, contextPoints);
+  const signal = analyzeMetadata(record);
+  const strengthened = { ...result };
+
+  if (isWeakGenericReason(strengthened.reason)) {
+    strengthened.reason = fallback.reason;
+  }
+
+  if (isWeakGenericReason(strengthened.personalReason)) {
+    strengthened.personalReason = fallback.personalReason;
+  }
+
+  if (strengthened.confidentiality === "Public" && fallback.confidentiality !== "Public") {
+    strengthened.confidentiality = fallback.confidentiality;
+    strengthened.reason = fallback.reason;
+    strengthened.confidenceScore = Math.max(strengthened.confidenceScore, fallback.confidenceScore);
+    strengthened.policyRecommendation = fallback.policyRecommendation;
+  }
+
+  if (
+    isSecretConfidentiality(fallback.confidentiality) &&
+    !isSecretConfidentiality(strengthened.confidentiality) &&
+    (signal.highRiskSecret || signal.secretSensitive || signal.specialCategory)
+  ) {
+    strengthened.confidentiality = fallback.confidentiality;
+    strengthened.reason = fallback.reason;
+    strengthened.confidenceScore = Math.max(strengthened.confidenceScore, fallback.confidenceScore);
+    strengthened.policyRecommendation = fallback.policyRecommendation;
+  }
+
+  if (strengthened.personalData !== "Yes" && fallback.personalData === "Yes") {
+    strengthened.personalData = "Yes";
+    strengthened.personalReason = fallback.personalReason;
+    strengthened.personalDataType = fallback.personalDataType;
+    strengthened.pseudonymizable = fallback.pseudonymizable;
+    strengthened.anonymizable = fallback.anonymizable;
+    strengthened.specialCategory = fallback.specialCategory;
+    strengthened.confidenceScore = Math.max(strengthened.confidenceScore, fallback.confidenceScore);
+    strengthened.policyRecommendation = fallback.policyRecommendation;
+  }
+
+  if (strengthened.personalData === "Yes" && fallback.personalData === "No" && !signal.personalData) {
+    strengthened.personalData = "No";
+    strengthened.personalReason = fallback.personalReason;
+    strengthened.personalDataType = "";
+    strengthened.pseudonymizable = "No";
+    strengthened.anonymizable = fallback.anonymizable;
+    strengthened.specialCategory = fallback.specialCategory;
+    strengthened.confidenceScore = Math.min(strengthened.confidenceScore, fallback.confidenceScore);
+    strengthened.policyRecommendation = fallback.policyRecommendation;
+  }
+
+  if (
+    ["Secret", "Top Secret"].includes(strengthened.confidentiality) &&
+    !signal.strongSensitive &&
+    !signal.specialCategory
+  ) {
+    strengthened.confidentiality = fallback.confidentiality;
+    strengthened.reason = fallback.reason;
+    strengthened.confidenceScore = Math.min(strengthened.confidenceScore, fallback.confidenceScore);
+    strengthened.policyRecommendation = fallback.policyRecommendation;
+  }
+
+  strengthened.evidence = mergeEvidence(strengthened.evidence, fallback.evidence);
+  return normalizeClassification(strengthened);
+}
+
+function isSecretConfidentiality(value) {
+  return value === "Secret" || value === "Top Secret";
+}
+
+function mergeEvidence(...evidenceLists) {
+  const evidence = [];
+  const seen = new Set();
+  for (const list of evidenceLists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      const value = String(item || "").trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      evidence.push(value);
+      if (evidence.length >= 10) return evidence;
+    }
+  }
+  return evidence;
+}
+
+function isWeakGenericReason(value) {
+  const text = String(value || "").toLowerCase();
+  return (
+    !text ||
+    text.includes("no bahrain pdpl personal-data or sensitive business indicator") ||
+    text.includes("no pdpl personal-data or sensitive business indicator") ||
+    text.includes("no sensitive business indicator is apparent") ||
+    text.includes("no personal-data signal") ||
+    text.includes("no direct personal-data conclusion")
+  );
+}
+
+function stripSource(result) {
+  const copy = { ...result };
+  delete copy.source;
+  return copy;
+}
+
+function buildCacheKey(record, contextHash) {
+  const normalized = normalizeRecordInput(record);
+  const dataType = String(normalized.dataType || "").trim().toLowerCase();
+  const sampleHash = crypto
+    .createHash("sha1")
+    .update(extractSampleValues(normalized).join("|"))
+    .digest("hex")
+    .slice(0, 10);
+  return [
+    CLASSIFICATION_POLICY_VERSION,
+    normalizeKey(normalized.tableName),
+    normalizeKey(normalized.columnName),
+    dataType,
+    sampleHash,
+    contextHash,
+  ].join("::");
+}
+
+function hashContext(contextPoints) {
+  const serialized = contextPoints.map((point) => `${point.tag}:${point.content}`).join("|");
+  return crypto.createHash("sha1").update(serialized).digest("hex").slice(0, 16);
+}
+
+module.exports = {
+  classifyRecords,
+  classifyRecordLocally(record, contextPoints = []) {
+    return localClassification(record, contextPoints);
+  },
+};

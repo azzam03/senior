@@ -15,3 +15,4 @@ database/backups/
 uploads/
 logs/
 tmp/
+.claude/
