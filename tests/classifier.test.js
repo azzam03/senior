@@ -173,42 +173,4 @@ test("sample values can provide high-confidence evidence without broad keyword m
     columnName: "primary_value",
     dataType: "nvarchar",
     original: { SampleValue: "person@example.com" },
-  }, strongSystemContext);
-  assert.equal(emailSample.personalData, "Yes");
-  assert.equal(emailSample.personalDataType, "Contact Information");
-  assert.ok(emailSample.evidence.length > 0);
-
-  const privateKeySample = classifyRecordLocally({
-    tableName: "Configuration",
-    columnName: "value",
-    dataType: "nvarchar",
-    original: { SampleValue: "-----BEGIN PRIVATE KEY----- abc -----END PRIVATE KEY-----" },
-  }, strongSystemContext);
-  assert.equal(isSecretLevel(privateKeySample), true);
-});
-
-test("each local classification carries an internal confidence score and evidence array", () => {
-  const result = classify("Users", "password");
-  assert.equal(typeof result.confidenceScore, "number");
-  assert.ok(result.confidenceScore >= 0 && result.confidenceScore <= 1);
-  assert.ok(Array.isArray(result.evidence));
-  assert.ok(result.evidence.length > 0, "credentials should produce evidence");
-});
-
-test("balanced distribution: a realistic mix is not all Personal and not all Secret", () => {
-  const mix = [
-    classify("Users", "email"),
-    classify("Users", "password"),
-    classify("Orders", "created_at"),
-    classify("Orders", "status"),
-    classify("RequestLogs", "service_name"),
-    classify("AuditLogs", "user_id"),
-    classify("Employees", "department"),
-  ];
-  const personalCount = mix.filter((r) => r.personalData === "Yes").length;
-  const secretCount = mix.filter((r) => isSecretLevel(r)).length;
-  assert.ok(personalCount < mix.length, "not every record should be Personal Data");
-  assert.ok(secretCount < mix.length, "not every record should be Secret");
-  assert.ok(personalCount >= 1, "at least one record should be Personal Data");
-  assert.ok(secretCount >= 1, "at least one record should be Secret");
-});
+  }, stron

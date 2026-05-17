@@ -1700,40 +1700,4 @@ app.use((error, _req, res, _next) => {
 
 // ── Graceful shutdown ────────────────────────────────────────────────────────
 // On SIGTERM / SIGINT we run a FULL WAL checkpoint before exiting.  This
-// ensures every committed write is merged from the WAL into the main database
-// file so that the on-disk app.db is always up-to-date even when the process
-// is stopped cleanly (e.g. by a process manager, Ctrl-C, or a deployment
-// script that restarts the server).
-function gracefulShutdown(signal) {
-  console.log(`\n${signal} — flushing WAL to database before exit...`);
-  try {
-    closeDatabase();
-    console.log("WAL checkpoint complete.");
-  } catch (err) {
-    console.error("WAL checkpoint failed during shutdown:", err.message);
-  }
-  process.exit(0);
-}
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
-process.on("beforeExit", () => {
-  try {
-    closeDatabase();
-  } catch (err) {
-    console.error("WAL checkpoint failed before exit:", err.message);
-  }
-});
-
-async function startServer() {
-  await initDatabase();
-  app.listen(PORT, () => {
-    process.env.STARTED_AT = nowIso();
-    console.log(`DATA CLASSIFICATION & GOVERNANCE PLATFORM running on http://localhost:${PORT}`);
-    console.log(`SQLite database: ${databasePath}`);
-    console.log(`SQLite backups: ${backupDir}`);
-  });
-}
-startServer().catch((error) => {
-  console.error("Failed to start platform:", error);
-  process.exit(1);
-});
+// ensures every committed write is 

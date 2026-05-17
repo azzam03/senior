@@ -410,10 +410,3 @@ function parseSseEvent(raw) {
   return {
     eventName,
     data: data ? JSON.parse(data) : null,
-  };
-}
-
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
