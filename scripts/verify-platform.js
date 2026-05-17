@@ -208,7 +208,7 @@ async function main() {
     throw new Error("PDPL obligation review status was not driven by Personal Data approval.");
   }
 
-  const exportResponse = await requestWithResponse(`/api/systems/${excelSystem.system.id}/export`);
+  const exportResponse = await requestWithResponse(`/api/systems/${excelSystem.system.id}/export/excel`);
   const exportBuffer = exportResponse.body;
   const exportContentType = exportResponse.headers.get("content-type") || "";
   const exportDisposition = exportResponse.headers.get("content-disposition") || "";
@@ -223,9 +223,9 @@ async function main() {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(exportPath);
   const sheetNames = workbook.worksheets.map((sheet) => sheet.name);
-  const requiredSheets = ["Overall", "System Data", "Personal Data", "PDPL"];
-  for (const sheet of requiredSheets) {
-    if (!sheetNames.includes(sheet)) throw new Error(`Missing export sheet: ${sheet}`);
+  const requiredSheets = ["Overall", "System Data", "Personal Data", "System Context", "PDPL"];
+  if (JSON.stringify(sheetNames) !== JSON.stringify(requiredSheets)) {
+    throw new Error(`Export workbook must contain only ${requiredSheets.join(", ")}. Found: ${sheetNames.join(", ")}`);
   }
   const systemDataSheet = workbook.getWorksheet("System Data");
   const personalDataSheet = workbook.getWorksheet("Personal Data");

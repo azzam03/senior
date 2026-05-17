@@ -839,12 +839,25 @@ function pct(part, total) {
   return total ? Math.round((part / total) * 100) : 0;
 }
 
-function exportFileName(systemName) {
-  const safeName = normalize(systemName)
-    .replace(/[^a-z0-9]+/gi, "-")
-    .replace(/^-|-$/g, "")
+function exportFileName(systemName, fallbackFileName) {
+  const fallbackStem = stripFileExtension(path.basename(normalize(fallbackFileName)));
+  const safeName = safeExportName(normalize(systemName) || fallbackStem || "system");
+  return `${safeName}_classification_report.xlsx`;
+}
+
+function stripFileExtension(fileName) {
+  const ext = path.extname(fileName || "");
+  return ext ? fileName.slice(0, -ext.length) : fileName;
+}
+
+function safeExportName(value) {
+  return String(value || "system")
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
     .slice(0, 80) || "system";
-  return `${safeName}-classification-report.xlsx`;
 }
 
 function contentDispositionAttachment(fileName) {
@@ -1620,7 +1633,7 @@ app.get("/api/systems/:id/classification-jobs/:jobId/stream", requireAuth, requi
 //   POST   /api/systems/:id/classification-jobs
 //   GET    /api/systems/:id/classification-jobs/:jobId/stream
 
-app.get("/api/systems/:id/export", requireAuth, requireSystemAccess, async (req, res, next) => {
+app.get(["/api/systems/:id/export/excel", "/api/systems/:id/export"], requireAuth, requireSystemAccess, async (req, res, next) => {
   try {
     const db = getDb();
     const rows = db.prepare("SELECT * FROM data_records WHERE systemId = ? ORDER BY rowIndex ASC").all(req.system.id).map(recordToApi);
@@ -1630,7 +1643,8 @@ app.get("/api/systems/:id/export", requireAuth, requireSystemAccess, async (req,
       .all(req.system.id);
     // The export endpoint deliberately returns exactly ONE artifact: a single .xlsx workbook
     // containing the five required sheets (Overall, System Data, Personal Data,
-    // System Context, PDPL). No ZIP, CSV, PDF, JSON, or any other file is produced.
+    // System Context, PDPL).
+    // No ZIP, CSV, PDF, JSON, HTML, or second file is produced.
     const workbook = await buildSystemDataExport({
       system: req.system,
       rows,
@@ -1640,7 +1654,7 @@ app.get("/api/systems/:id/export", requireAuth, requireSystemAccess, async (req,
       contextPoints,
     });
 
-    const fileName = exportFileName(req.system.name);
+    const fileName = exportFileName(req.system.name, req.system.lastUploadFileName);
     const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
     res.status(200);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -1665,6 +1679,10 @@ app.get("/", authOptional, (req, res) => {
 
 app.get(["/app", "/app/*"], requirePageAuth, (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "API route not found" });
 });
 
 app.get("*", (req, res) => {

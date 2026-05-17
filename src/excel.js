@@ -488,9 +488,9 @@ function buildDataSheet(workbook, name, rows, originalColumns, personalOnly) {
   };
 }
 
-// NOTE: The "Links & General Info" sheet (which previously produced a second deliverable in
-// the export flow) has been removed. The export now produces exactly one .xlsx workbook with
-// five sheets: Overall, System Data, Personal Data, System Context, PDPL.
+// NOTE: The "Links & General Info" sheet is intentionally excluded from this
+// export. The export produces exactly one .xlsx workbook with five sheets:
+// Overall, System Data, Personal Data, System Context, PDPL.
 
 function buildSystemContextSheet(workbook, { system, contextPoints }) {
   const sheet = workbook.addWorksheet("System Context", {

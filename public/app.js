@@ -88,9 +88,7 @@ async function downloadSystemExport() {
   button.disabled = true;
 
   try {
-    const response = await fetch(`/api/systems/${state.currentSystem.id}/export`, {
-      credentials: "same-origin",
-    });
+    const response = await fetchExcelExportResponse(state.currentSystem.id);
 
     if (response.status === 401 && state.user) {
       state.user = null;
@@ -102,11 +100,22 @@ async function downloadSystemExport() {
       throw new Error(await exportErrorMessage(response));
     }
 
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) {
+      const text = await response.text().catch(() => "");
+      throw new Error(
+        `Export endpoint returned HTML instead of XLSX. Check the API route and SPA fallback.${text ? ` ${text.slice(0, 120)}` : ""}`
+      );
+    }
+    if (!contentType.includes("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) {
+      throw new Error(`Export endpoint returned "${contentType || "unknown content type"}" instead of XLSX.`);
+    }
+
     const blob = await response.blob();
     if (!blob.size) throw new Error("The exported workbook was empty.");
 
     const fileName = fileNameFromContentDisposition(response.headers.get("content-disposition"))
-      || `${safeFileStem(state.currentSystem.name)}-classification-report.xlsx`;
+      || excelExportFileName(state.currentSystem);
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -119,6 +128,22 @@ async function downloadSystemExport() {
   } finally {
     button.disabled = false;
   }
+}
+
+async function fetchExcelExportResponse(systemId) {
+  const options = {
+    method: "GET",
+    credentials: "include",
+    headers: {
+      Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    },
+  };
+  const primary = await fetch(`/api/systems/${systemId}/export/excel`, options);
+  if (primary.status !== 404) return primary;
+
+  // Compatibility for an already-running backend process that has the legacy
+  // export route loaded but has not been restarted with /export/excel yet.
+  return fetch(`/api/systems/${systemId}/export`, options);
 }
 
 async function exportErrorMessage(response) {
@@ -139,8 +164,22 @@ function fileNameFromContentDisposition(header) {
   return asciiMatch ? asciiMatch[1] : "";
 }
 
+function excelExportFileName(system) {
+  const base = system?.name || stripFileExtension(system?.lastUploadFileName) || "system";
+  return `${safeFileStem(base)}_classification_report.xlsx`;
+}
+
+function stripFileExtension(fileName) {
+  return String(fileName || "").replace(/\.[^.\\/]+$/, "");
+}
+
 function safeFileStem(value) {
-  return String(value || "system").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "system";
+  return String(value || "system")
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "") || "system";
 }
 
 function bindAuthEvents() {
@@ -266,11 +305,15 @@ function bindDataEvents() {
     }
   });
 
-  qs("#importExcelButton").addEventListener("click", () => {
+  qs("#importExcelButton").addEventListener("click", (event) => {
+    event.preventDefault();
     closeActionsMenu();
     qs("#metadataFileInput").click();
   });
-  qs("#importFilePrimaryButton").addEventListener("click", () => qs("#metadataFileInput").click());
+  qs("#importFilePrimaryButton").addEventListener("click", (event) => {
+    event.preventDefault();
+    qs("#metadataFileInput").click();
+  });
 
   qs("#uploadForm").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -307,7 +350,9 @@ function bindDataEvents() {
     closeActionsMenu();
     startClassification("all");
   });
-  qs("#exportExcelButton").addEventListener("click", () => {
+  qs("#exportExcelButton").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     downloadSystemExport().catch((error) => toast(error.message || "Export failed."));
   });
 

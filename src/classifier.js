@@ -5,7 +5,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_TIMEOUT_MS = Math.max(5000, Number(process.env.OPENAI_TIMEOUT_MS || 25000));
 const OPENAI_NO_CREDITS_CODE = "OPENAI_NO_CREDITS";
-const CLASSIFICATION_POLICY_VERSION = "bahrain-pdpl-v4";
+const CLASSIFICATION_POLICY_VERSION = "bahrain-pdpl-v5";
 const BAHRAIN_PDPL_REFERENCE_URL = "https://www.pdp.gov.bh/en/assets/pdf/regulations.pdf";
 
 const BAHRAIN_PDPL_CONTEXT = [
@@ -23,7 +23,7 @@ async function classifyRecords(records, contextPoints) {
   const missing = [];
 
   for (const record of records) {
-    const cacheKey = buildCacheKey(record.tableName, record.columnName, contextHash);
+    const cacheKey = buildCacheKey(record, contextHash);
     const cached = db.prepare("SELECT resultJson FROM classification_cache WHERE cacheKey = ?").get(cacheKey);
     if (cached) {
       resultMap.set(record.id, { ...JSON.parse(cached.resultJson), source: "cache" });
@@ -53,8 +53,8 @@ async function classifyRecords(records, contextPoints) {
     );
     const now = new Date().toISOString();
     for (const record of missing) {
-      const result = classified.get(record.id) || localClassification(record.tableName, record.columnName, contextPoints);
-      const cacheKey = buildCacheKey(record.tableName, record.columnName, contextHash);
+      const result = classified.get(record.id) || localClassification(record, contextPoints);
+      const cacheKey = buildCacheKey(record, contextHash);
       upsert.run(cacheKey, record.tableName, record.columnName, contextHash, JSON.stringify(stripSource(result)), now, now);
       resultMap.set(record.id, result);
     }
@@ -132,7 +132,7 @@ async function classifyWithOpenAI(records, contextPoints) {
 
   for (const record of records) {
     if (!map.has(record.id)) {
-      map.set(record.id, localClassification(record.tableName, record.columnName, contextPoints));
+      map.set(record.id, localClassification(record, contextPoints));
     }
   }
 
@@ -177,11 +177,12 @@ function buildApiWarning(error) {
 }
 
 function buildPrompt(records, contextPoints) {
+  const surroundingColumnsByTable = buildSurroundingColumns(records);
   return JSON.stringify(
     {
       instructions: [
         "Classify each metadata record for enterprise confidentiality and personal data governance.",
-        "Use only tableName, columnName, and systemContext. Do not infer from other uploaded columns.",
+        "Use tableName, columnName, dataType, sampleValues, surroundingColumns, and systemContext. Do not rely on broad assumptions beyond that metadata.",
         "Ground confidentiality and personal-data reasons in Bahrain's Personal Data Protection Law and official Bahrain data protection regulatory concepts.",
         "Do not cite raw article numbers or implementation notes; provide concise business-readable legal relevance.",
         "System Context may describe the system and review posture, but it must not make every field Secret, Confidential, or Personal Data.",
@@ -203,6 +204,7 @@ function buildPrompt(records, contextPoints) {
         "confidentiality must be one of Public, Confidential, Secret, Top Secret.",
         "personalData must be Yes or No. Location data and device identifiers are personal data only when the metadata indicates they can identify or track a natural person, not merely because broad system context mentions users.",
         "confidenceScore must be a number from 0 to 1.",
+        "evidence must be a short array of concrete metadata signals that justify the classification, such as credential-column, direct-contact-column, subject-table-id, system-field, or low-confidence.",
         "policyRecommendation should use concise Bahrain PDPL governance language such as lawful basis review, consent required, masking recommended, restricted access, retention needed, transfer review needed, or no action.",
       ],
       legalGrounding: BAHRAIN_PDPL_CONTEXT,
@@ -211,6 +213,9 @@ function buildPrompt(records, contextPoints) {
         index,
         tableName: record.tableName,
         columnName: record.columnName,
+        dataType: record.dataType || metadataValue(record, ["DataType", "Data Type", "Type"]),
+        sampleValues: extractSampleValues(record),
+        surroundingColumns: surroundingColumnsByTable.get(normalizeKey(record.tableName)) || [],
       })),
       outputShape: {
         classifications: [
@@ -225,6 +230,7 @@ function buildPrompt(records, contextPoints) {
             anonymizable: "Yes",
             specialCategory: "No",
             confidenceScore: 0.9,
+            evidence: ["direct-contact-column", "subject-table"],
             policyRecommendation: "masking recommended; restricted access",
           },
         ],
@@ -238,14 +244,107 @@ function buildPrompt(records, contextPoints) {
 function classifyWithLocalRules(records, contextPoints) {
   const map = new Map();
   for (const record of records) {
-    map.set(record.id, localClassification(record.tableName, record.columnName, contextPoints));
+    map.set(record.id, localClassification(record, contextPoints));
   }
   return map;
 }
 
-function localClassification(tableName, columnName, contextPoints = []) {
-  const signal = analyzeMetadata(tableName, columnName);
-  const hasContext = Array.isArray(contextPoints) && contextPoints.length > 0;
+function normalizeRecordInput(recordOrTableName, columnName) {
+  if (recordOrTableName && typeof recordOrTableName === "object") {
+    const original = normalizeOriginalMetadata(recordOrTableName.original || recordOrTableName.originalJson || {});
+    const normalizedRecord = { ...recordOrTableName, original };
+    return {
+      ...normalizedRecord,
+      tableName: recordOrTableName.tableName || recordOrTableName.TableName || metadataValue(normalizedRecord, ["TableName", "Table Name"]),
+      columnName: recordOrTableName.columnName || recordOrTableName.ColumnName || metadataValue(normalizedRecord, ["ColumnName", "Column Name"]),
+      dataType: recordOrTableName.dataType || recordOrTableName.DataType || metadataValue(normalizedRecord, ["DataType", "Data Type", "Type"]),
+      original,
+    };
+  }
+  return {
+    tableName: recordOrTableName || "",
+    columnName: Array.isArray(columnName) ? "" : columnName || "",
+    dataType: "",
+    original: {},
+  };
+}
+
+function normalizeOriginalMetadata(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function metadataValue(record, expectedNames) {
+  const original = record?.original && typeof record.original === "object" ? record.original : {};
+  const sources = [original, record || {}];
+  const expected = expectedNames.map((name) => compact(name));
+  for (const source of sources) {
+    for (const [key, value] of Object.entries(source)) {
+      if (expected.includes(compact(key)) && value != null && String(value).trim() !== "") {
+        return value;
+      }
+    }
+  }
+  return "";
+}
+
+function extractSampleValues(record) {
+  const sampleValue = metadataValue(record, [
+    "SampleValue",
+    "Sample Values",
+    "Sample",
+    "Samples",
+    "Example",
+    "Examples",
+    "Example Value",
+    "Value Sample",
+    "Data Sample",
+    "Sample Data",
+    "Distinct Values",
+  ]);
+  if (sampleValue == null || sampleValue === "") return [];
+  const rawValues = Array.isArray(sampleValue)
+    ? sampleValue
+    : String(sampleValue).split(/\r?\n|;|\|/);
+  return rawValues
+    .flatMap((value) => String(value).split(/,(?=\s*[^,\s]{2,})/))
+    .map((value) => String(value).trim())
+    .filter(Boolean)
+    .slice(0, 5)
+    .map((value) => value.slice(0, 120));
+}
+
+function buildSurroundingColumns(records) {
+  const map = new Map();
+  for (const record of records) {
+    const tableKey = normalizeKey(record.tableName);
+    if (!tableKey) continue;
+    if (!map.has(tableKey)) map.set(tableKey, new Set());
+    if (record.columnName) map.get(tableKey).add(String(record.columnName));
+  }
+  return new Map(
+    Array.from(map.entries()).map(([tableKey, columns]) => [
+      tableKey,
+      Array.from(columns).slice(0, 20),
+    ])
+  );
+}
+
+function normalizeKey(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function localClassification(recordOrTableName, columnNameOrContextPoints, contextPoints = []) {
+  const record = normalizeRecordInput(recordOrTableName, columnNameOrContextPoints);
+  const effectiveContextPoints = Array.isArray(columnNameOrContextPoints) ? columnNameOrContextPoints : contextPoints;
+  const signal = analyzeMetadata(record);
+  const hasContext = Array.isArray(effectiveContextPoints) && effectiveContextPoints.length > 0;
   const evidence = [];
 
   let confidentiality = signal.publicReference ? "Public" : "Confidential";
@@ -357,12 +456,17 @@ function localClassification(tableName, columnName, contextPoints = []) {
 }
 
 function analyzeMetadata(tableName, columnName) {
-  const table = String(tableName || "").toLowerCase();
-  const column = String(columnName || "").toLowerCase();
+  const record = normalizeRecordInput(tableName, columnName);
+  const table = String(record.tableName || "").toLowerCase();
+  const column = String(record.columnName || "").toLowerCase();
+  const dataType = String(record.dataType || metadataValue(record, ["DataType", "Data Type", "Type"])).toLowerCase();
+  const sampleValues = extractSampleValues(record);
+  const sampleText = sampleValues.join(" ").toLowerCase();
   const compactTable = compact(table);
   const compactColumn = compact(column);
-  const metadata = `${table} ${column}`;
-  const compactMetadata = `${compactTable} ${compactColumn}`;
+  const compactDataType = compact(dataType);
+  const metadata = `${table} ${column} ${dataType}`;
+  const compactMetadata = `${compactTable} ${compactColumn} ${compactDataType}`;
 
   const technicalTable = /(hangfire|jobparameter|backgroundjob|backgroundjobs|setting|settings|configuration|config|lookup|log|logs|auditlog|auditlogs|systemparameter|systemparameters|parameter|parameters|trace|telemetry|metric|metrics|event|events|errorlog|errorlogs|servicelog|servicelogs|sessionlogs|requestlogs)/i.test(compactTable);
   const referenceTable = /(lookup|reference|status|type|category|catalog|currency|country)/i.test(compactTable);
@@ -378,7 +482,8 @@ function analyzeMetadata(tableName, columnName) {
   // Credentials / authentication secrets - strict anchored patterns.
   const highRiskSecret =
     /(password|passwd|passcode|pwd|privatekey|encryptionkey|signingkey|apikey|accesstoken|refreshtoken|sessiontoken|bearertoken|bearer|authtoken|authkey|authorizationheader|authheader|oauthtoken|clientsecret|securityanswer|securityquestion|recoveryanswer|recoverycode|otpsecret|mfasecret|salt|saltvalue|passwordhash|hashedpassword|credentials?|tokenhash)/i.test(compactColumn) ||
-    /(certificate|publickey|sshkey|pgpkey)/i.test(compactColumn);
+    /(sshprivatekey|pgpprivatekey)/i.test(compactColumn) ||
+    hasSecretSample(sampleText);
 
   // Long, unambiguous patterns matched against the compacted column name.
   // Short ambiguous tokens (passport, ssn, nid, dob) are matched only as whole
@@ -388,11 +493,18 @@ function analyzeMetadata(tableName, columnName) {
     /(nationalidnumber|nationalnumber|nationalid|civilidnumber|civilnumber|civilid|passportnumber|passportno|identitynumber|idnumber|licensenumber|drivinglicensenumber|drivinglicense|residencynumber|residencyid|iqamanumber|iqama)/i.test(compactColumn) ||
     /\b(passport|ssn|nid|dob)\b/i.test(column);
   const financialAccount = /(iban|bankaccount|accountnumber|cardnumber|creditcard|debitcard|paymentaccount|swiftcode|routingnumber)/i.test(compactColumn);
-  const health = /(health|medical|diagnosis|patient|clinic|hospital|disability|biometric|genetic|prescription)/i.test(compactMetadata);
-  const specialCategory = /(health|medical|diagnosis|patient|biometric|genetic|religion|criminal|disability|ethnic|politicalopinion)/i.test(compactMetadata);
+  const technicalHealthCheck = /(healthcheck|servicehealth|systemhealth|heartbeat)/i.test(compactMetadata);
+  const healthColumn = /(medical|diagnosis|patient|clinic|hospital|disability|biometric|genetic|prescription|healthrecord|healthcondition|bloodtype|allergy)/i.test(compactColumn);
+  const healthTable = !technicalHealthCheck && /(patient|medical|clinic|hospital|healthrecord|prescription)/i.test(compactTable);
+  const health = healthColumn || healthTable;
+  const specialCategorySignal =
+    health ||
+    /(biometric|genetic|religion|criminal|disability|ethnic|politicalopinion|childdata|minor)/i.test(compactMetadata);
   const secretSensitive = governmentId || financialAccount || health;
 
-  const directContact = /(emailaddress|^email$|personalemail|workemail|phonenumber|^phone$|mobile|mobilenumber|contactnumber|telephone|^address$|homeaddress|postaladdress|mailingaddress|streetaddress)/i.test(compactColumn);
+  const sampleEmail = hasEmailSample(sampleText);
+  const samplePhone = hasPhoneSample(sampleText);
+  const directContact = /(emailaddress|^email$|personalemail|workemail|phonenumber|^phone$|mobile|mobilenumber|contactnumber|telephone|^address$|homeaddress|postaladdress|mailingaddress|streetaddress)/i.test(compactColumn) || sampleEmail || samplePhone;
   const directName = /(fullname|firstname|lastname|middlename|givenname|familyname|arabicname|englishname|applicantname|ownername|contactname|customername|employeename|personname|displayname|username|loginname|screenname)/i.test(compactColumn);
   const directBirthDate = /(dateofbirth|birthdate|^dob$|birthday)/i.test(compactColumn);
   const locationIdentifier = /(latitude|longitude|gps|geolocation|coordinates|homelocation|userlocation)/i.test(compactColumn);
@@ -408,6 +520,7 @@ function analyzeMetadata(tableName, columnName) {
   const subjectSpecificIdentifier = subjectSpecificIdentifierColumn && subjectTable;
   const personalFinancial = subjectTable && /(salary|payroll|income|tax|compensation|allowance|bonus|wage)/i.test(compactColumn);
   const demographicPersonal = subjectTable && /(age|gender|nationality|maritalstatus|religion|ethnicity)/i.test(compactColumn);
+  const healthPersonal = health && !technicalHealthCheck && !pureSystemField;
 
   // Weak device identifiers only count as Personal Data when in a subject table.
   const weakIdentifierAsPersonal = weakDeviceIdentifier && subjectTable;
@@ -418,6 +531,7 @@ function analyzeMetadata(tableName, columnName) {
     subjectSpecificIdentifier ||
     personalFinancial ||
     demographicPersonal ||
+    healthPersonal ||
     weakIdentifierAsPersonal
   );
 
@@ -426,7 +540,7 @@ function analyzeMetadata(tableName, columnName) {
     if (governmentId) personalDataType = "Government Identifier";
     else if (health) personalDataType = "Health Data";
     else if (financialAccount || personalFinancial) personalDataType = "Financial Data";
-    else if (directContact) personalDataType = "Contact Information";
+    else if (sampleEmail || samplePhone || directContact) personalDataType = "Contact Information";
     else if (directName) personalDataType = compactColumn.includes("username") || compactColumn.includes("login") ? "Identifier" : "Name";
     else if (directBirthDate || demographicPersonal) personalDataType = "Demographic Attribute";
     else if (locationIdentifier) personalDataType = "Location Data";
@@ -459,11 +573,30 @@ function analyzeMetadata(tableName, columnName) {
     demographicPersonal,
     personalData,
     personalDataType,
-    specialCategory,
+    specialCategory: specialCategorySignal && personalData && !pureSystemField,
     operational: /(audit|transaction|order|case|ticket|workflow|approval|payment|invoice|contract|asset|inventory|integration|interface)/i.test(metadata),
     internalOnly: /(internal|private|admin|security|permission|access|configuration|policy)/i.test(metadata),
     strongSensitive: highRiskSecret || secretSensitive,
   };
+}
+
+function hasSecretSample(sampleText) {
+  return (
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/i.test(sampleText) ||
+    /\bsk_(live|test)_[a-z0-9]{12,}\b/i.test(sampleText) ||
+    /\bAKIA[0-9A-Z]{16}\b/.test(sampleText) ||
+    /\bxox[baprs]-[a-z0-9-]{12,}\b/i.test(sampleText) ||
+    /\beyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\b/i.test(sampleText) ||
+    /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)\s*[:=]\s*["']?[a-z0-9._~+/=-]{16,}/i.test(sampleText)
+  );
+}
+
+function hasEmailSample(sampleText) {
+  return /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(sampleText);
+}
+
+function hasPhoneSample(sampleText) {
+  return /(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?){2,4}\d{3,4}/.test(sampleText);
 }
 
 function compact(value) {
@@ -512,8 +645,8 @@ function normalizeClassification(input) {
 }
 
 function strengthenClassification(result, record, contextPoints) {
-  const fallback = localClassification(record.tableName, record.columnName, contextPoints);
-  const signal = analyzeMetadata(record.tableName, record.columnName);
+  const fallback = localClassification(record, contextPoints);
+  const signal = analyzeMetadata(record);
   const strengthened = { ...result };
 
   if (isWeakGenericReason(strengthened.reason)) {
@@ -525,6 +658,17 @@ function strengthenClassification(result, record, contextPoints) {
   }
 
   if (strengthened.confidentiality === "Public" && fallback.confidentiality !== "Public") {
+    strengthened.confidentiality = fallback.confidentiality;
+    strengthened.reason = fallback.reason;
+    strengthened.confidenceScore = Math.max(strengthened.confidenceScore, fallback.confidenceScore);
+    strengthened.policyRecommendation = fallback.policyRecommendation;
+  }
+
+  if (
+    isSecretConfidentiality(fallback.confidentiality) &&
+    !isSecretConfidentiality(strengthened.confidentiality) &&
+    (signal.highRiskSecret || signal.secretSensitive || signal.specialCategory)
+  ) {
     strengthened.confidentiality = fallback.confidentiality;
     strengthened.reason = fallback.reason;
     strengthened.confidenceScore = Math.max(strengthened.confidenceScore, fallback.confidenceScore);
@@ -564,7 +708,28 @@ function strengthenClassification(result, record, contextPoints) {
     strengthened.policyRecommendation = fallback.policyRecommendation;
   }
 
+  strengthened.evidence = mergeEvidence(strengthened.evidence, fallback.evidence);
   return normalizeClassification(strengthened);
+}
+
+function isSecretConfidentiality(value) {
+  return value === "Secret" || value === "Top Secret";
+}
+
+function mergeEvidence(...evidenceLists) {
+  const evidence = [];
+  const seen = new Set();
+  for (const list of evidenceLists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      const value = String(item || "").trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      evidence.push(value);
+      if (evidence.length >= 10) return evidence;
+    }
+  }
+  return evidence;
 }
 
 function isWeakGenericReason(value) {
@@ -585,8 +750,22 @@ function stripSource(result) {
   return copy;
 }
 
-function buildCacheKey(tableName, columnName, contextHash) {
-  return `${CLASSIFICATION_POLICY_VERSION}::${String(tableName || "").trim().toLowerCase()}::${String(columnName || "").trim().toLowerCase()}::${contextHash}`;
+function buildCacheKey(record, contextHash) {
+  const normalized = normalizeRecordInput(record);
+  const dataType = String(normalized.dataType || "").trim().toLowerCase();
+  const sampleHash = crypto
+    .createHash("sha1")
+    .update(extractSampleValues(normalized).join("|"))
+    .digest("hex")
+    .slice(0, 10);
+  return [
+    CLASSIFICATION_POLICY_VERSION,
+    normalizeKey(normalized.tableName),
+    normalizeKey(normalized.columnName),
+    dataType,
+    sampleHash,
+    contextHash,
+  ].join("::");
 }
 
 function hashContext(contextPoints) {
@@ -597,6 +776,6 @@ function hashContext(contextPoints) {
 module.exports = {
   classifyRecords,
   classifyRecordLocally(record, contextPoints = []) {
-    return localClassification(record.tableName, record.columnName, contextPoints);
+    return localClassification(record, contextPoints);
   },
 };

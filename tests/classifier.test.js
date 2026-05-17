@@ -106,6 +106,14 @@ test("credentials and authentication secrets are Secret or Top Secret", () => {
   }
 });
 
+test("public keys and certificates are not treated as secrets without private-key context", () => {
+  const publicKey = classify("Certificates", "public_key");
+  assert.equal(isSecretLevel(publicKey), false, "public_key should not be Secret by name alone");
+
+  const certificate = classify("Certificates", "certificate");
+  assert.equal(isSecretLevel(certificate), false, "certificate should not be Secret by name alone");
+});
+
 test("user_id is Personal Data only in subject tables (not in technical/log tables)", () => {
   const inUserTable = classify("Users", "user_id");
   assert.equal(inUserTable.personalData, "Yes");
@@ -145,6 +153,38 @@ test("generic attributes do not auto-become Personal Data or Secret", () => {
     assert.equal(result.personalData, "No", `${table}.${column} should not be Personal Data`);
     assert.equal(isSecretLevel(result), false, `${table}.${column} should not be Secret`);
   }
+});
+
+test("special category is reserved for clear sensitive personal data", () => {
+  const healthCheckStatus = classify("HealthCheck", "status");
+  assert.equal(healthCheckStatus.personalData, "No");
+  assert.equal(healthCheckStatus.specialCategory, "No");
+  assert.equal(isSecretLevel(healthCheckStatus), false);
+
+  const diagnosis = classify("Patients", "diagnosis_code");
+  assert.equal(diagnosis.personalData, "Yes");
+  assert.equal(diagnosis.specialCategory, "Yes");
+  assert.equal(isSecretLevel(diagnosis), true);
+});
+
+test("sample values can provide high-confidence evidence without broad keyword matching", () => {
+  const emailSample = classifyRecordLocally({
+    tableName: "Contacts",
+    columnName: "primary_value",
+    dataType: "nvarchar",
+    original: { SampleValue: "person@example.com" },
+  }, strongSystemContext);
+  assert.equal(emailSample.personalData, "Yes");
+  assert.equal(emailSample.personalDataType, "Contact Information");
+  assert.ok(emailSample.evidence.length > 0);
+
+  const privateKeySample = classifyRecordLocally({
+    tableName: "Configuration",
+    columnName: "value",
+    dataType: "nvarchar",
+    original: { SampleValue: "-----BEGIN PRIVATE KEY----- abc -----END PRIVATE KEY-----" },
+  }, strongSystemContext);
+  assert.equal(isSecretLevel(privateKeySample), true);
 });
 
 test("each local classification carries an internal confidence score and evidence array", () => {
