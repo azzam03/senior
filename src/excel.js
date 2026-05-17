@@ -235,65 +235,67 @@ function isApprovedPersonalRecord(row) {
 function buildOverallSheet(workbook, { system, summary, pdpl }) {
   const sheet = workbook.addWorksheet("Overall", {
     views: [{ showGridLines: false }],
+    pageSetup: { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
   });
   sheet.columns = [
-    { width: 28 },
-    { width: 20 },
-    { width: 22 },
-    { width: 22 },
-    { width: 22 },
-    { width: 26 },
+    { width: 18 },
+    { width: 15 },
+    { width: 15 },
+    { width: 15 },
+    { width: 15 },
+    { width: 15 },
+    { width: 18 },
+    { width: 15 },
+    { width: 15 },
+    { width: 15 },
+    { width: 15 },
+    { width: 15 },
   ];
 
-  sheet.mergeCells("A1:F1");
-  sheet.getCell("A1").value = "DATA CLASSIFICATION & GOVERNANCE PLATFORM";
-  sheet.getCell("A1").font = { bold: true, size: 18, color: { argb: "FFFFFFFF" } };
-  sheet.getCell("A1").fill = fill("1D4ED8");
-  sheet.getCell("A1").alignment = { vertical: "middle" };
-  sheet.getRow(1).height = 30;
+  styleSheetBackground(sheet, 1, 48, 12, "F8FAFC");
+  buildOverallHero(sheet, system);
+  buildSystemInfoPanel(sheet, system);
 
-  sheet.mergeCells("A3:F3");
-  sheet.getCell("A3").value = `${system.name} - Client Classification Report`;
-  sheet.getCell("A3").font = { bold: true, size: 16, color: { argb: "FF111827" } };
-
-  addKeyValue(sheet, 5, "Responsible Owner", system.owner, "DBA", system.dba);
-  addKeyValue(sheet, 6, "Owner Email", system.ownerEmail, "System Group", system.systemGroup);
-  addKeyValue(sheet, 7, "Uploaded File", system.lastUploadFileName || "No file uploaded", "Status", system.status);
-  addKeyValue(sheet, 8, "Source System", system.sourceSystemRef || "Not recorded", "Target System", system.targetSystemRef || "Not recorded");
-
-  addSectionHeader(sheet, 10, "Executive Classification Summary");
   const cards = [
-    ["Fully Classified", summary.classified, `${summary.classifiedPercentage}%`],
-    ["Personal Data", summary.personal, `${summary.personalPercentage}%`],
-    ["Pending Classification", summary.pending, `${summary.pendingPercentage}%`],
-    ["Review Queue", summary.reviewQueue, "items"],
-    ["Low Confidence", summary.lowConfidence, "items"],
-    ["Tables With Personal Data", summary.tablesWithPersonalData, "tables"],
+    { label: "Fully Classified", value: summary.classified, detail: `${summary.classifiedPercentage}%`, color: "2563EB" },
+    { label: "Personal Data", value: summary.personal, detail: `${summary.personalPercentage}%`, color: "0F766E" },
+    { label: "Pending Classification", value: summary.pending, detail: `${summary.pendingPercentage}%`, color: "D97706" },
+    { label: "Review Queue", value: summary.reviewQueue, detail: "items", color: "7C3AED" },
+    { label: "Low Confidence", value: summary.lowConfidence, detail: "items", color: "DC2626" },
+    { label: "Tables With Personal Data", value: summary.tablesWithPersonalData, detail: "tables", color: "0891B2" },
   ];
-  let row = 11;
-  for (let index = 0; index < cards.length; index += 3) {
-    addMetricCard(sheet, row, 1, cards[index]);
-    addMetricCard(sheet, row, 3, cards[index + 1]);
-    addMetricCard(sheet, row, 5, cards[index + 2]);
-    row += 4;
-  }
+  addKpiCard(sheet, 11, 1, cards[0]);
+  addKpiCard(sheet, 11, 3, cards[1]);
+  addKpiCard(sheet, 11, 5, cards[2]);
+  addKpiCard(sheet, 11, 7, cards[3]);
+  addKpiCard(sheet, 11, 9, cards[4]);
+  addKpiCard(sheet, 11, 11, cards[5]);
+  addProgressBand(sheet, 15, "Classification Progress", summary.classificationProgress, "2563EB");
 
-  addSectionHeader(sheet, 20, "Confidentiality Distribution");
-  addSummaryTable(sheet, 21, [
-    ["Confidentiality", "Count"],
-    ["Confidential", summary.confidentiality.Confidential || 0],
-    ["Secret", summary.confidentiality.Secret || 0],
-    ["Top Secret", summary.confidentiality["Top Secret"] || 0],
-    ["Public", summary.confidentiality.Public || 0],
-    ["Pending", summary.confidentiality.Pending || 0],
+  addHorizontalBarChart(sheet, 18, 1, 6, "Confidentiality Chart", [
+    { label: "Confidential", value: summary.confidentiality.Confidential || 0, color: "F59E0B" },
+    { label: "Secret", value: summary.confidentiality.Secret || 0, color: "DC2626" },
+    { label: "Top Secret", value: summary.confidentiality["Top Secret"] || 0, color: "7C3AED" },
+    { label: "Public", value: summary.confidentiality.Public || 0, color: "16A34A" },
+    { label: "Pending", value: summary.confidentiality.Pending || 0, color: "64748B" },
   ]);
 
-  const personalTypeRows = personalDataTypeRows(summary);
-  const personalTypesStart = 29;
-  addSectionHeader(sheet, personalTypesStart, "Personal Data Type Counts");
-  addSummaryTable(sheet, personalTypesStart + 1, personalTypeRows);
+  addHorizontalBarChart(sheet, 18, 7, 6, "Personal Data Chart", [
+    { label: "Has Personal Data", value: summary.personal || 0, color: "0F766E" },
+    { label: "No Personal Data", value: Math.max(0, Number(summary.totalRecords || 0) - Number(summary.personal || 0)), color: "2563EB" },
+    { label: "Needs Review", value: summary.reviewQueue || 0, color: "D97706" },
+  ]);
 
-  const governanceStart = personalTypesStart + personalTypeRows.length + 3;
+  const personalTypeChartRows = personalDataTypeRows(summary)
+    .slice(1, 7)
+    .map(([label, count], index) => ({
+      label,
+      value: count,
+      color: ["0F766E", "0891B2", "2563EB", "7C3AED", "D97706", "475569"][index] || "475569",
+    }));
+  addHorizontalBarChart(sheet, 27, 1, 12, "Personal Data Type Counts", personalTypeChartRows);
+
+  const governanceStart = Math.max(37, 30 + Math.max(4, personalTypeChartRows.length));
   const governanceRows = [
     ["Indicator", "Status"],
     ["Data Subject Rights Coverage", pdpl?.dataSubjectRightsCoverage || "Needs Review"],
@@ -302,10 +304,60 @@ function buildOverallSheet(workbook, { system, summary, pdpl }) {
     ["Policy Recommendations", summary.policyRecommendationCount],
     ["Classification Progress", `${summary.classificationProgress}%`],
   ];
-  addSectionHeader(sheet, governanceStart, "Governance and PDPL Summary");
-  addSummaryTable(sheet, governanceStart + 1, governanceRows);
+  addSectionHeader(sheet, governanceStart, "Governance and PDPL Summary", 12);
+  addSummaryTable(sheet, governanceStart + 1, governanceRows, { width: 12 });
 
-  applyOuterBorders(sheet, `A1:F${governanceStart + governanceRows.length + 1}`);
+  applyOuterBorders(sheet, `A1:L${governanceStart + governanceRows.length + 1}`);
+}
+
+function styleSheetBackground(sheet, startRow, endRow, endCol, color) {
+  for (let row = startRow; row <= endRow; row += 1) {
+    sheet.getRow(row).height = sheet.getRow(row).height || 20;
+    for (let col = 1; col <= endCol; col += 1) {
+      sheet.getCell(row, col).fill = fill(color);
+    }
+  }
+}
+
+function buildOverallHero(sheet, system) {
+  sheet.mergeCells("A1:L1");
+  sheet.mergeCells("A2:L2");
+  sheet.mergeCells("A3:L3");
+  sheet.getCell("A1").value = "DATA CLASSIFICATION & GOVERNANCE PLATFORM";
+  sheet.getCell("A2").value = `${system.name} - Client Classification Report`;
+  sheet.getCell("A3").value = `Generated ${new Date().toISOString().slice(0, 10)} | Excel Governance Dashboard`;
+  [1, 2, 3].forEach((rowNumber) => {
+    const row = sheet.getRow(rowNumber);
+    row.height = rowNumber === 2 ? 32 : 24;
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.fill = fill("0F172A");
+      cell.alignment = { vertical: "middle", horizontal: "center" };
+    });
+  });
+  sheet.getCell("A1").font = { bold: true, size: 13, color: { argb: "FF93C5FD" } };
+  sheet.getCell("A2").font = { bold: true, size: 20, color: { argb: "FFFFFFFF" } };
+  sheet.getCell("A3").font = { italic: true, size: 10, color: { argb: "FFE2E8F0" } };
+}
+
+function buildSystemInfoPanel(sheet, system) {
+  addSectionHeader(sheet, 5, "System Profile", 12);
+  const rows = [
+    ["Responsible Owner", system.owner || "Not recorded", "DBA", system.dba || "Not recorded", "Status", system.status],
+    ["Owner Email", system.ownerEmail || "Not recorded", "System Group", system.systemGroup || "Not recorded", "Uploaded File", system.lastUploadFileName || "No file uploaded"],
+    ["Source System", system.sourceSystemRef || "Not recorded", "Target System", system.targetSystemRef || "Not recorded", "Related Links", system.relatedSystemLinks || "Not recorded"],
+  ];
+  rows.forEach((items, offset) => {
+    const row = sheet.getRow(6 + offset);
+    row.height = 24;
+    row.values = [null, ...items];
+    for (let col = 1; col <= 12; col += 1) {
+      const cell = row.getCell(col);
+      cell.border = border("CBD5E1");
+      cell.alignment = { vertical: "middle", wrapText: true };
+      cell.fill = fill(col % 2 === 1 ? "EFF6FF" : "FFFFFF");
+      cell.font = col % 2 === 1 ? { bold: true, color: { argb: "FF334155" } } : { color: { argb: "FF111827" } };
+    }
+  });
 }
 
 function addKeyValue(sheet, row, leftKey, leftValue, rightKey, rightValue) {
@@ -318,29 +370,35 @@ function addKeyValue(sheet, row, leftKey, leftValue, rightKey, rightValue) {
   });
 }
 
-function addSectionHeader(sheet, row, title) {
-  sheet.mergeCells(row, 1, row, 6);
+function addSectionHeader(sheet, row, title, width = 6) {
+  sheet.mergeCells(row, 1, row, width);
   const cell = sheet.getCell(row, 1);
   cell.value = title;
   cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
-  cell.fill = fill("334155");
+  cell.fill = fill("1E293B");
   cell.alignment = { vertical: "middle" };
+  sheet.getRow(row).height = 24;
 }
 
-function addMetricCard(sheet, row, col, card) {
+function addKpiCard(sheet, row, col, card) {
   if (!card) return;
   sheet.mergeCells(row, col, row, col + 1);
   sheet.mergeCells(row + 1, col, row + 2, col + 1);
-  sheet.getCell(row, col).value = card[0];
+  sheet.getCell(row, col).value = card.label;
   sheet.getCell(row, col).font = { bold: true, color: { argb: "FF475569" } };
-  sheet.getCell(row + 1, col).value = `${card[1]} ${card[2]}`;
-  sheet.getCell(row + 1, col).font = { bold: true, size: 18, color: { argb: "FF1D4ED8" } };
+  sheet.getCell(row + 1, col).value = Number(card.value || 0);
+  sheet.getCell(row + 1, col).font = { bold: true, size: 18, color: { argb: `FF${card.color}` } };
+  sheet.getCell(row + 2, col).value = card.detail;
+  sheet.getCell(row + 2, col).font = { italic: true, size: 10, color: { argb: "FF64748B" } };
   [row, row + 1, row + 2].forEach((r) => {
     for (let c = col; c <= col + 1; c += 1) {
-      sheet.getCell(r, c).fill = fill("EFF6FF");
+      sheet.getCell(r, c).fill = fill("FFFFFF");
       sheet.getCell(r, c).border = border("BFDBFE");
+      sheet.getCell(r, c).alignment = { vertical: "middle", horizontal: "center" };
     }
   });
+  sheet.getCell(row, col).fill = fill("F1F5F9");
+  sheet.getCell(row, col + 1).fill = fill("F1F5F9");
 }
 
 function personalDataTypeRows(summary) {
@@ -355,18 +413,87 @@ function personalDataTypeRows(summary) {
   ];
 }
 
-function addSummaryTable(sheet, startRow, values) {
+function addSummaryTable(sheet, startRow, values, options = {}) {
+  const width = Number(options.width || values[0]?.length || 2);
   values.forEach((items, offset) => {
     const row = sheet.getRow(startRow + offset);
     row.values = [null, ...items];
-    row.eachCell((cell) => {
+    for (let col = 1; col <= width; col += 1) {
+      const cell = row.getCell(col);
       cell.border = border("CBD5E1");
       cell.alignment = { vertical: "middle" };
       if (offset === 0) {
         cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
-        cell.fill = fill("1D4ED8");
+        cell.fill = fill("1E40AF");
+      } else {
+        cell.fill = fill(offset % 2 === 0 ? "F8FAFC" : "FFFFFF");
       }
+    }
+  });
+}
+
+function addProgressBand(sheet, rowNumber, label, value, color) {
+  const pct = Math.max(0, Math.min(100, Number(value || 0)));
+  sheet.mergeCells(rowNumber, 1, rowNumber, 2);
+  sheet.getCell(rowNumber, 1).value = label;
+  sheet.getCell(rowNumber, 1).font = { bold: true, color: { argb: "FF334155" } };
+  sheet.getCell(rowNumber, 1).alignment = { vertical: "middle" };
+  const barStart = 3;
+  const barEnd = 11;
+  const filled = Math.round(((barEnd - barStart + 1) * pct) / 100);
+  for (let col = barStart; col <= barEnd; col += 1) {
+    const cell = sheet.getCell(rowNumber, col);
+    cell.value = "";
+    cell.fill = fill(col - barStart < filled ? color : "E2E8F0");
+    cell.border = border("FFFFFF");
+  }
+  sheet.getCell(rowNumber, 12).value = `${pct}%`;
+  sheet.getCell(rowNumber, 12).font = { bold: true, color: { argb: `FF${color}` } };
+  sheet.getCell(rowNumber, 12).alignment = { vertical: "middle", horizontal: "right" };
+  sheet.getRow(rowNumber).height = 22;
+}
+
+function addHorizontalBarChart(sheet, startRow, startCol, width, title, rows) {
+  const endCol = startCol + width - 1;
+  sheet.mergeCells(startRow, startCol, startRow, endCol);
+  const titleCell = sheet.getCell(startRow, startCol);
+  titleCell.value = title;
+  titleCell.font = { bold: true, size: 12, color: { argb: "FFFFFFFF" } };
+  titleCell.fill = fill("0F172A");
+  titleCell.alignment = { vertical: "middle", horizontal: "center" };
+  sheet.getRow(startRow).height = 24;
+
+  const maxValue = Math.max(...rows.map((row) => Number(row.value || 0)), 1);
+  const total = rows.reduce((sum, row) => sum + Number(row.value || 0), 0);
+  const barStart = startCol + 3;
+  const barEnd = endCol;
+  const barCells = Math.max(1, barEnd - barStart + 1);
+
+  rows.forEach((item, index) => {
+    const rowNumber = startRow + index + 1;
+    const value = Number(item.value || 0);
+    const pct = total ? Math.round((value / total) * 100) : 0;
+    const filled = Math.max(value > 0 ? 1 : 0, Math.round((value / maxValue) * barCells));
+    const row = sheet.getRow(rowNumber);
+    row.height = 22;
+
+    sheet.getCell(rowNumber, startCol).value = item.label;
+    sheet.getCell(rowNumber, startCol + 1).value = value;
+    sheet.getCell(rowNumber, startCol + 2).value = `${pct}%`;
+    [startCol, startCol + 1, startCol + 2].forEach((col) => {
+      const cell = sheet.getCell(rowNumber, col);
+      cell.fill = fill(index % 2 === 0 ? "FFFFFF" : "F8FAFC");
+      cell.border = border("E2E8F0");
+      cell.alignment = { vertical: "middle" };
+      if (col === startCol) cell.font = { bold: true, color: { argb: "FF334155" } };
     });
+
+    for (let col = barStart; col <= barEnd; col += 1) {
+      const cell = sheet.getCell(rowNumber, col);
+      cell.value = "";
+      cell.fill = fill(col - barStart < filled ? item.color : "E2E8F0");
+      cell.border = border("FFFFFF");
+    }
   });
 }
 
