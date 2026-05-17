@@ -83,7 +83,6 @@ async function api(url, options = {}) {
 async function downloadSystemExport() {
   if (!state.currentSystem) return;
   closeActionsMenu();
-  updateFileNameLabels(state.currentSystem.lastUploadFileName || "No file uploaded");
   const button = qs("#exportExcelButton");
   button.disabled = true;
 
@@ -102,11 +101,21 @@ async function downloadSystemExport() {
       throw new Error(await exportErrorMessage(response));
     }
 
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) {
+      const text = await response.text();
+      throw new Error(
+        `Export endpoint returned HTML instead of XLSX. ` +
+        `Check the API route and server configuration. ` +
+        `(status ${response.status})`
+      );
+    }
+
     const blob = await response.blob();
     if (!blob.size) throw new Error("The exported workbook was empty.");
 
     const fileName = fileNameFromContentDisposition(response.headers.get("content-disposition"))
-      || `${safeFileStem(state.currentSystem.name)}-classification-report.xlsx`;
+      || `${safeFileStem(state.currentSystem.name)}_classification_report.xlsx`;
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -140,7 +149,14 @@ function fileNameFromContentDisposition(header) {
 }
 
 function safeFileStem(value) {
-  return String(value || "system").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "system";
+  return (
+    String(value || "system")
+      .trim()
+      .replace(/\s+/g, "_")
+      .replace(/[^a-z0-9_]/gi, "")
+      .replace(/_+/g, "_")
+      .replace(/^_|_$/g, "") || "system"
+  );
 }
 
 function bindAuthEvents() {
@@ -307,7 +323,8 @@ function bindDataEvents() {
     closeActionsMenu();
     startClassification("all");
   });
-  qs("#exportExcelButton").addEventListener("click", () => {
+  qs("#exportExcelButton").addEventListener("click", (event) => {
+    event.stopPropagation();
     downloadSystemExport().catch((error) => toast(error.message || "Export failed."));
   });
 

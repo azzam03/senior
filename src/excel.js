@@ -116,16 +116,14 @@ async function buildSystemDataExport({ system, rows, originalColumns, summary, p
   workbook.creator = "DATA CLASSIFICATION & GOVERNANCE PLATFORM";
   workbook.created = new Date();
 
-  // The workbook MUST contain exactly these five sheets in this order:
+  // The workbook MUST contain exactly these four sheets in this order:
   //   1. Overall
   //   2. System Data
   //   3. Personal Data
-  //   4. System Context
-  //   5. PDPL
+  //   4. PDPL
   buildOverallSheet(workbook, { system: safeSystem, summary: safeSummary, pdpl: safePdpl });
   buildDataSheet(workbook, "System Data", safeRows, safeColumns, false);
   buildDataSheet(workbook, "Personal Data", personalRows, safeColumns, true);
-  buildSystemContextSheet(workbook, { system: safeSystem, contextPoints: safeContextPoints });
   buildPdplSheet(workbook, { system: safeSystem, rows: approvedPersonalRows, pdpl: safePdpl });
 
   return workbook;

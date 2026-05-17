@@ -62,11 +62,10 @@ test("export workbook contains required sheets and reviewed data", async () => {
 
   const parsed = new ExcelJS.Workbook();
   await parsed.xlsx.load(buffer);
-  // Exactly five sheets, in the required order. No extra sheets (no "Links & General Info",
-  // no second workbook, no companion file).
+  // Exactly four sheets, in the required order. No extra sheets, no second workbook, no companion file.
   assert.deepEqual(
     parsed.worksheets.map((sheet) => sheet.name),
-    ["Overall", "System Data", "Personal Data", "System Context", "PDPL"]
+    ["Overall", "System Data", "Personal Data", "PDPL"]
   );
 
   const systemRows = worksheetObjects(parsed.getWorksheet("System Data"));
@@ -80,11 +79,6 @@ test("export workbook contains required sheets and reviewed data", async () => {
   assert.equal(personalRows.some((row) => row.TableName === "JobParameter" && row.ColumnName === "Name"), false);
   assert.equal(personalRows.some((row) => row.TableName === "Users" && row.ColumnName === "Email"), true);
 
-  const contextRows = worksheetObjects(parsed.getWorksheet("System Context"), 6);
-  assert.equal(contextRows.length, 2);
-  assert.equal(contextRows[0]["Context Tag"], "System Description");
-  assert.equal(contextRows[1]["Context Tag"], "Data Sources");
-
   const pdplRows = worksheetObjects(parsed.getWorksheet("PDPL"), 8);
   assert.equal(pdplRows.some((row) => row.Table === "Employees" && row.Column === "FullName"), true);
   assert.equal(pdplRows.some((row) => row.Table === "Applicants" && row.Column === "NationalId"), true);
@@ -92,7 +86,7 @@ test("export workbook contains required sheets and reviewed data", async () => {
   assert.equal(pdplRows.every((row) => row["PDPL Approval Status"] === "Approved"), true);
 });
 
-test("export workbook renders System Context placeholder when no context recorded", async () => {
+test("export workbook with no data still produces the four required sheets", async () => {
   const workbook = await buildSystemDataExport({
     system: { name: "No Context System" },
     originalColumns: ["TableName", "ColumnName"],
@@ -105,11 +99,8 @@ test("export workbook renders System Context placeholder when no context recorde
   await parsed.xlsx.load(Buffer.from(await workbook.xlsx.writeBuffer()));
   assert.deepEqual(
     parsed.worksheets.map((sheet) => sheet.name),
-    ["Overall", "System Data", "Personal Data", "System Context", "PDPL"]
+    ["Overall", "System Data", "Personal Data", "PDPL"]
   );
-  const contextRows = worksheetObjects(parsed.getWorksheet("System Context"), 6);
-  assert.equal(contextRows.length, 1);
-  assert.equal(contextRows[0]["Context Tag"], "No context recorded");
 });
 
 function sampleRows() {
