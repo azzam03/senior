@@ -841,10 +841,12 @@ function pct(part, total) {
 
 function exportFileName(systemName) {
   const safeName = normalize(systemName)
-    .replace(/[^a-z0-9]+/gi, "-")
-    .replace(/^-|-$/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/gi, "")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
     .slice(0, 80) || "system";
-  return `${safeName}-classification-report.xlsx`;
+  return `${safeName}_classification_report.xlsx`;
 }
 
 function contentDispositionAttachment(fileName) {
