@@ -1298,7 +1298,9 @@ progress::-moz-progress-bar {
 .table-controls {
   flex: 1 1 540px;
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
 }
 
 .segmented-control {
@@ -1306,6 +1308,7 @@ progress::-moz-progress-bar {
 }
 
 .search-box {
+  width: 420px;
   min-width: 280px;
   max-width: 420px;
 }
@@ -1324,7 +1327,7 @@ progress::-moz-progress-bar {
 
 .actions-menu-list {
   position: absolute;
-  right: 0;
+  left: 0;
   z-index: 5;
   display: grid;
   min-width: 238px;
